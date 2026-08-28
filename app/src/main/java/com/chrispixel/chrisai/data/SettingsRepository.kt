@@ -1,12 +1,15 @@
 package com.chrispixel.chrisai.data
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.chrispixel.chrisai.BuildConfig
 import com.chrispixel.chrisai.data.model.AiModel
+import com.chrispixel.chrisai.data.personality.PersonalityConfig
 import com.chrispixel.chrisai.nativebridge.NativeCrypto
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharingStarted
@@ -50,6 +53,55 @@ class SettingsRepository(
         .map { prefs -> parseCachedModels(prefs[KEY_MODELS_CACHE]) }
         .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
+    /** v0.6 personality configuration. */
+    val personality: StateFlow<PersonalityConfig> = context.settingsDataStore.data
+        .map { prefs ->
+            PersonalityConfig(
+                name = prefs[KEY_PERSONALITY_NAME]?.takeIf { it.isNotBlank() } ?: "ChrisAI",
+                presetId = prefs[KEY_PERSONALITY_PRESET]?.takeIf { it.isNotBlank() } ?: "casual",
+                humorLevel = prefs[KEY_PERSONALITY_HUMOR]?.coerceIn(1, 5) ?: 2,
+                detailLevel = prefs[KEY_PERSONALITY_DETAIL]?.coerceIn(1, 5) ?: 2,
+                communicationStyle = prefs[KEY_PERSONALITY_STYLE].orEmpty(),
+                customInstructions = prefs[KEY_PERSONALITY_CUSTOM].orEmpty()
+            )
+        }
+        .stateIn(scope, SharingStarted.Eagerly, PersonalityConfig())
+
+    /** Subtle haptic feedback (v0.6), on by default. */
+    val hapticsEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_HAPTICS_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
+    /** Emotion/animation effects (v0.6), on by default. */
+    val animationsEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_ANIMATIONS_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
+    /** Read replies aloud with TTS automatically after streaming (v0.6). */
+    val autoRead: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_AUTO_READ] ?: false }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /** TTS enabled at all (v0.6). */
+    val ttsEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_TTS_ENABLED] ?: false }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /** TTS speech rate multiplier (0.5..2.0). */
+    val ttsRate: StateFlow<Float> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_TTS_RATE]?.coerceIn(0.5f, 2.0f) ?: 1.0f }
+        .stateIn(scope, SharingStarted.Eagerly, 1.0f)
+
+    /** Preferred TTS voice name (empty = system default). */
+    val ttsVoice: StateFlow<String> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_TTS_VOICE].orEmpty() }
+        .stateIn(scope, SharingStarted.Eagerly, "")
+
+    /** Preferred STT input language (empty = system default). */
+    val sttLanguage: StateFlow<String> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_STT_LANGUAGE].orEmpty() }
+        .stateIn(scope, SharingStarted.Eagerly, "")
+
     init {
         scope.launch { migrateLegacyPreferences() }
     }
@@ -70,6 +122,55 @@ class SettingsRepository(
 
     suspend fun saveCachedModels(models: List<AiModel>) {
         context.settingsDataStore.edit { it[KEY_MODELS_CACHE] = encodeModels(models) }
+    }
+
+    // ------------------------------------------------------------------ v0.6
+
+    suspend fun setPersonality(config: PersonalityConfig) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[KEY_PERSONALITY_NAME] = config.name.trim().take(30)
+            prefs[KEY_PERSONALITY_PRESET] = config.presetId
+            prefs[KEY_PERSONALITY_HUMOR] = config.humorLevel.coerceIn(1, 5)
+            prefs[KEY_PERSONALITY_DETAIL] = config.detailLevel.coerceIn(1, 5)
+            prefs[KEY_PERSONALITY_STYLE] = config.communicationStyle.trim().take(120)
+            prefs[KEY_PERSONALITY_CUSTOM] = config.customInstructions.trim().take(800)
+        }
+    }
+
+    suspend fun setPersonalityName(name: String) {
+        context.settingsDataStore.edit { it[KEY_PERSONALITY_NAME] = name.trim().take(30) }
+    }
+
+    suspend fun setPersonalityPreset(presetId: String) {
+        context.settingsDataStore.edit { it[KEY_PERSONALITY_PRESET] = presetId }
+    }
+
+    suspend fun setHapticsEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_HAPTICS_ENABLED] = enabled }
+    }
+
+    suspend fun setAnimationsEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_ANIMATIONS_ENABLED] = enabled }
+    }
+
+    suspend fun setAutoRead(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_AUTO_READ] = enabled }
+    }
+
+    suspend fun setTtsEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_TTS_ENABLED] = enabled }
+    }
+
+    suspend fun setTtsRate(rate: Float) {
+        context.settingsDataStore.edit { it[KEY_TTS_RATE] = rate.coerceIn(0.5f, 2.0f) }
+    }
+
+    suspend fun setTtsVoice(voiceName: String) {
+        context.settingsDataStore.edit { it[KEY_TTS_VOICE] = voiceName }
+    }
+
+    suspend fun setSttLanguage(language: String) {
+        context.settingsDataStore.edit { it[KEY_STT_LANGUAGE] = language }
     }
 
     /** One-time import of the old SharedPreferences-based settings (v"1.0"). */
@@ -157,6 +258,19 @@ class SettingsRepository(
         val KEY_MODEL = stringPreferencesKey("model")
         val KEY_TEMPERATURE = floatPreferencesKey("temperature")
         val KEY_MODELS_CACHE = stringPreferencesKey("models_cache")
+        val KEY_PERSONALITY_NAME = stringPreferencesKey("personality_name")
+        val KEY_PERSONALITY_PRESET = stringPreferencesKey("personality_preset")
+        val KEY_PERSONALITY_HUMOR = intPreferencesKey("personality_humor")
+        val KEY_PERSONALITY_DETAIL = intPreferencesKey("personality_detail")
+        val KEY_PERSONALITY_STYLE = stringPreferencesKey("personality_style")
+        val KEY_PERSONALITY_CUSTOM = stringPreferencesKey("personality_custom")
+        val KEY_HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled")
+        val KEY_ANIMATIONS_ENABLED = booleanPreferencesKey("animations_enabled")
+        val KEY_AUTO_READ = booleanPreferencesKey("auto_read")
+        val KEY_TTS_ENABLED = booleanPreferencesKey("tts_enabled")
+        val KEY_TTS_RATE = floatPreferencesKey("tts_rate")
+        val KEY_TTS_VOICE = stringPreferencesKey("tts_voice")
+        val KEY_STT_LANGUAGE = stringPreferencesKey("stt_language")
         const val DEFAULT_TEMPERATURE = 0.7
         const val PLAIN_PREFIX = "plain:"
     }

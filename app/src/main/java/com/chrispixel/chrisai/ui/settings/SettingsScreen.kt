@@ -28,10 +28,15 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -41,17 +46,27 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.KeyboardOptions
 import com.chrispixel.chrisai.BuildConfig
+import com.chrispixel.chrisai.data.personality.PersonalityConfig
+import com.chrispixel.chrisai.data.personality.PersonalityPreset
 import com.chrispixel.chrisai.data.update.ReleaseInfo
 import com.chrispixel.chrisai.ui.ChrisViewModel
 import com.chrispixel.chrisai.ui.UpdateUiState
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.text.KeyboardOptions
 
 @Composable
 fun SettingsScreen(vm: ChrisViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scrollState = rememberScrollState()
+
+    val ttsVoices = remember { mutableStateListOf<String>() }
+    LaunchedEffect(state.ttsEnabled) {
+        if (state.ttsEnabled) {
+            ttsVoices.clear()
+            ttsVoices.addAll(vm.ttsVoices())
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -75,6 +90,36 @@ fun SettingsScreen(vm: ChrisViewModel) {
 
         SectionHeader("Temperatura")
         TemperatureSection(temperature = state.temperature, onChanged = { vm.setTemperature(it) })
+
+        SectionHeader("Personalidad")
+        PersonalitySection(
+            config = state.personality,
+            feedback = state.personalityFeedback,
+            onSave = { vm.setPersonality(it) },
+            onReset = { vm.resetPersonality() },
+            onDismissFeedback = { vm.dismissPersonalityFeedback() }
+        )
+
+        SectionHeader("Voz y audio")
+        VoiceSection(
+            ttsEnabled = state.ttsEnabled,
+            ttsRate = state.ttsRate,
+            ttsVoice = state.ttsVoice,
+            autoRead = state.autoRead,
+            onTtsEnabled = { vm.setTtsEnabled(it) },
+            onRate = { vm.setTtsRate(it) },
+            onVoice = { vm.setTtsVoice(it) },
+            onAutoRead = { vm.setAutoRead(it) },
+            ttsVoices = ttsVoices
+        )
+
+        SectionHeader("Experiencia")
+        ExperienceSection(
+            hapticsEnabled = state.hapticsEnabled,
+            animationsEnabled = state.animationsEnabled,
+            onHaptics = { vm.setHapticsEnabled(it) },
+            onAnimations = { vm.setAnimationsEnabled(it) }
+        )
 
         SectionHeader("Memoria persistente")
         MemorySection(
@@ -227,6 +272,228 @@ private fun TemperatureSection(temperature: Double, onChanged: (Double) -> Unit)
         onValueChangeFinished = { onChanged(value.toDouble()) },
         valueRange = 0f..1f,
         steps = 19
+    )
+}
+
+@Composable
+private fun PersonalitySection(
+    config: PersonalityConfig,
+    feedback: String?,
+    onSave: (PersonalityConfig) -> Unit,
+    onReset: () -> Unit,
+    onDismissFeedback: () -> Unit
+) {
+    var name by rememberSaveable { mutableStateOf(config.name) }
+    var presetId by rememberSaveable { mutableStateOf(config.presetId) }
+    var humor by rememberSaveable { mutableIntStateOf(config.humorLevel) }
+    var detail by rememberSaveable { mutableIntStateOf(config.detailLevel) }
+    var style by rememberSaveable { mutableStateOf(config.communicationStyle) }
+    var instructions by rememberSaveable { mutableStateOf(config.customInstructions) }
+
+    Text(
+        "Define cómo habla y responde ChrisAI. Las reglas de seguridad siempre tienen prioridad.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(8.dp))
+
+    OutlinedTextField(
+        value = name,
+        onValueChange = { name = it.take(30) },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text("Nombre del asistente") },
+        singleLine = true,
+        supportingText = { Text("${name.length}/30") }
+    )
+    Spacer(Modifier.height(8.dp))
+
+    Text("Preset", style = MaterialTheme.typography.titleSmall)
+    PersonalityPreset.all().forEach { preset ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { presetId = preset.id }
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RadioButton(selected = preset.id == presetId, onClick = { presetId = preset.id })
+            Spacer(Modifier.width(4.dp))
+            Column {
+                Text(preset.label, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    preset.description,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+
+    Spacer(Modifier.height(8.dp))
+    Text("Humor: $humor/5", style = MaterialTheme.typography.bodyMedium)
+    Slider(
+        value = humor.toFloat(),
+        onValueChange = { humor = it.toInt().coerceIn(1, 5) },
+        valueRange = 1f..5f,
+        steps = 3
+    )
+    Text("Detalle: $detail/5", style = MaterialTheme.typography.bodyMedium)
+    Slider(
+        value = detail.toFloat(),
+        onValueChange = { detail = it.toInt().coerceIn(1, 5) },
+        valueRange = 1f..5f,
+        steps = 3
+    )
+
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = style,
+        onValueChange = { style = it.take(120) },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text("Estilo de comunicación") },
+        placeholder = { Text("Ej.: conversacional y directa") },
+        singleLine = true
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = instructions,
+        onValueChange = { instructions = it.take(800) },
+        modifier = Modifier.fillMaxWidth().height(120.dp),
+        label = { Text("Instrucciones personalizadas") },
+        placeholder = { Text("Siempre salúdame por mi nombre, evita tecnicismos…") },
+        maxLines = 4
+    )
+
+    if (feedback != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            feedback,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable { onDismissFeedback() }
+        )
+    }
+
+    Spacer(Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Button(
+            onClick = {
+                onSave(
+                    PersonalityConfig(
+                        name = name,
+                        presetId = presetId,
+                        humorLevel = humor,
+                        detailLevel = detail,
+                        communicationStyle = style,
+                        customInstructions = instructions
+                    )
+                )
+            }
+        ) {
+            Text("Guardar personalidad")
+        }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(onClick = onReset) {
+            Text("Restablecer")
+        }
+    }
+}
+
+@Composable
+private fun VoiceSection(
+    ttsEnabled: Boolean,
+    ttsRate: Float,
+    ttsVoice: String,
+    autoRead: Boolean,
+    onTtsEnabled: (Boolean) -> Unit,
+    onRate: (Float) -> Unit,
+    onVoice: (String) -> Unit,
+    onAutoRead: (Boolean) -> Unit,
+    ttsVoices: List<String>
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Leer respuestas en voz alta", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Switch(checked = ttsEnabled, onCheckedChange = onTtsEnabled)
+    }
+    Text(
+        "Añade un botón 🔊 en cada respuesta. La síntesis es nativa de Android, sin conexión extra.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+
+    if (ttsEnabled) {
+        Spacer(Modifier.height(8.dp))
+        Text("Velocidad: %.2fx".format(ttsRate), style = MaterialTheme.typography.bodyMedium)
+        Slider(
+            value = ttsRate,
+            onValueChange = onRate,
+            valueRange = 0.5f..2.0f,
+            steps = 14
+        )
+
+        if (ttsVoices.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text("Voz actual: ${ttsVoice.ifBlank { "predeterminada" }}", style = MaterialTheme.typography.bodyMedium)
+            ttsVoices.take(8).forEach { voice ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onVoice(voice) }
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = voice == ttsVoice, onClick = { onVoice(voice) })
+                    Spacer(Modifier.width(4.dp))
+                    Text(voice, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                }
+            }
+        } else {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Ninguna voz disponible ahora. Reinicia la aplicación si acabas de activar el TTS.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Lectura automática al terminar", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Switch(checked = autoRead, onCheckedChange = onAutoRead)
+        }
+        Text(
+            "Reproduce cada respuesta del asistente automáticamente sin tocar nada.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun ExperienceSection(
+    hapticsEnabled: Boolean,
+    animationsEnabled: Boolean,
+    onHaptics: (Boolean) -> Unit,
+    onAnimations: (Boolean) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Vibración sutil", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Switch(checked = hapticsEnabled, onCheckedChange = onHaptics)
+    }
+    Text(
+        "Pequeñas pulsaciones al enviar y en cada fragmento de la respuesta.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(8.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Animaciones", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Switch(checked = animationsEnabled, onCheckedChange = onAnimations)
+    }
+    Text(
+        "Fondos de color según el estado de ChrisAI y transiciones suaves.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
     )
 }
 

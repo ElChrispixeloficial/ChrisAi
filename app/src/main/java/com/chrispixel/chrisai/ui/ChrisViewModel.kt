@@ -5,13 +5,19 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.chrispixel.chrisai.BuildConfig
 import com.chrispixel.chrisai.ChrisApplication
+import com.chrispixel.chrisai.data.emotion.Emotion
+import com.chrispixel.chrisai.data.emotion.EmotionClassifier
 import com.chrispixel.chrisai.data.local.MemoryIntent
+import com.chrispixel.chrisai.data.local.MemoryWriteResult
 import com.chrispixel.chrisai.data.model.AiModel
 import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
 import com.chrispixel.chrisai.data.model.Memory
+import com.chrispixel.chrisai.data.personality.PersonalityConfig
 import com.chrispixel.chrisai.data.remote.OpenRouterException
+import com.chrispixel.chrisai.data.speech.SttEvent
+import com.chrispixel.chrisai.data.speech.TtsStatus
 import com.chrispixel.chrisai.data.update.ReleaseInfo
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -44,7 +50,27 @@ data class ChatUiState(
     val memoryFeedback: String? = null,
     val apiKeySet: Boolean = false,
     val temperature: Double = 0.7,
-    val update: UpdateUiState = UpdateUiState()
+    val update: UpdateUiState = UpdateUiState(),
+    // v0.6
+    val personality: PersonalityConfig = PersonalityConfig(),
+    val personalityFeedback: String? = null,
+    val emotion: Emotion = Emotion.NEUTRAL,
+    val hapticsEnabled: Boolean = true,
+    val animationsEnabled: Boolean = true,
+    val autoRead: Boolean = false,
+    val ttsEnabled: Boolean = false,
+    val ttsRate: Float = 1.0f,
+    val ttsVoice: String = "",
+    val sttLanguage: String = "",
+    val ttsStatus: TtsStatus = TtsStatus.Unavailable,
+    val listening: Boolean = false,
+    val sttPartial: String? = null,
+    val listeningError: String? = null,
+    val ttsError: String? = null,
+    val exportText: String? = null,
+    val exportTextId: String? = null,
+    // metric hops/aggregation (root totals across the current session)
+    val messagesSent: Int = 0
 )
 
 class ChrisViewModel(app: Application) : AndroidViewModel(app) {
@@ -72,11 +98,32 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 availableModels = ensureDefaultModel(container.settings.availableModels.value),
                 memories = container.memory.list(),
                 apiKeySet = container.settings.apiKey.value.isNotBlank(),
-                temperature = container.settings.temperature.value
+                temperature = container.settings.temperature.value,
+                personality = container.settings.personality.value,
+                hapticsEnabled = container.settings.hapticsEnabled.value,
+                animationsEnabled = container.settings.animationsEnabled.value,
+                autoRead = container.settings.autoRead.value,
+                ttsEnabled = container.settings.ttsEnabled.value,
+                ttsRate = container.settings.ttsRate.value,
+                ttsVoice = container.settings.ttsVoice.value,
+                sttLanguage = container.settings.sttLanguage.value,
+                messagesSent = first?.messages?.count { it.role == ChatRole.USER } ?: 0
             )
+            observeTts()
             checkForUpdates(
                 quiet = true
             )
+        }
+    }
+
+    private fun observeTts() {
+        viewModelScope.launch {
+            container.tts.status.collect { status ->
+                _state.value = _state.value.copy(
+                    ttsStatus = status,
+                    ttsError = if (status is TtsStatus.Error) status.message else _state.value.ttsError
+                )
+            }
         }
     }
 
@@ -92,6 +139,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             _state.value = current.copy(error = "No hay una API key disponible en esta build.")
             return
         }
+
+        container.haptics.confirm()
 
         viewModelScope.launch {
             val localReply = handleMemoryIntent(trimmed)
@@ -116,15 +165,26 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             _state.value = _state.value.copy(
                 currentSessionId = session.id,
                 messages = session.messages,
-                error = null
+                error = null,
+                emotion = Emotion.NEUTRAL,
+                messagesSent = session.messages.count { it.role == ChatRole.USER }
             )
         }
     }
 
     fun startNewChat() {
         streamingJob?.cancel()
+        container.tts.stop()
         val current = _state.value
-        _state.value = current.copy(currentSessionId = null, messages = emptyList(), error = null)
+        _state.value = current.copy(
+            currentSessionId = null,
+            messages = emptyList(),
+            error = null,
+            emotion = Emotion.NEUTRAL,
+            messagesSent = 0,
+            listening = false,
+            sttPartial = null
+        )
     }
 
     fun deleteSession(id: String) {
@@ -135,7 +195,9 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = current.copy(
             sessions = sessions,
             currentSessionId = if (wasCurrent) null else current.currentSessionId,
-            messages = if (wasCurrent) emptyList() else current.messages
+            messages = if (wasCurrent) emptyList() else current.messages,
+            messagesSent = if (wasCurrent) 0 else current.messagesSent,
+            emotion = if (wasCurrent) Emotion.NEUTRAL else current.emotion
         )
         viewModelScope.launch { container.chatStore.delete(id) }
     }
@@ -192,14 +254,184 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(temperature = bounded)
     }
 
+    // ------------------------------------------------------- v0.6 personality
+
+    fun setPersonality(config: PersonalityConfig) {
+        viewModelScope.launch {
+            container.settings.setPersonality(config)
+            _state.value = _state.value.copy(
+                personality = container.settings.personality.value,
+                personalityFeedback = "Personalidad actualizada."
+            )
+        }
+    }
+
+    fun resetPersonality() {
+        setPersonality(PersonalityConfig())
+    }
+
+    fun dismissPersonalityFeedback() {
+        _state.value = _state.value.copy(personalityFeedback = null)
+    }
+
+    // ------------------------------------------------------ v0.6 preferences
+
+    fun setHapticsEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setHapticsEnabled(enabled) }
+        _state.value = _state.value.copy(hapticsEnabled = enabled)
+        if (enabled) container.haptics.confirm()
+    }
+
+    fun setAnimationsEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setAnimationsEnabled(enabled) }
+        _state.value = _state.value.copy(animationsEnabled = enabled)
+    }
+
+    fun setAutoRead(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setAutoRead(enabled) }
+        _state.value = _state.value.copy(autoRead = enabled)
+        if (!enabled) container.tts.stop()
+    }
+
+    // --------------------------------------------------------------- v0.6 TTS
+
+    fun setTtsEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setTtsEnabled(enabled) }
+        _state.value = _state.value.copy(ttsEnabled = enabled)
+        if (enabled) {
+            container.tts.initialize { }
+        } else {
+            container.tts.shutdown()
+        }
+    }
+
+    fun setTtsRate(rate: Float) {
+        val bounded = rate.coerceIn(0.5f, 2.0f)
+        viewModelScope.launch { container.settings.setTtsRate(bounded) }
+        _state.value = _state.value.copy(ttsRate = bounded)
+    }
+
+    fun setTtsVoice(voiceName: String) {
+        viewModelScope.launch { container.settings.setTtsVoice(voiceName) }
+        _state.value = _state.value.copy(ttsVoice = voiceName)
+        container.tts.setVoicePreference(voiceName)
+    }
+
+    fun ttsVoices(): List<String> = container.tts.listVoices()
+
+    fun speakMessage(messageId: String, text: String) {
+        if (!_state.value.ttsEnabled) return
+        val current = _state.value
+        val status = current.ttsStatus
+        when {
+            status is TtsStatus.Speaking && status.messageId == messageId -> {
+                container.tts.pause()
+            }
+            status is TtsStatus.Paused && status.messageId == messageId -> {
+                container.tts.resume(current.ttsRate)
+            }
+            else -> {
+                container.tts.speak(messageId, text, current.ttsRate)
+            }
+        }
+    }
+
+    fun stopSpeech() {
+        container.tts.stop()
+    }
+
+    fun dismissTtsError() {
+        _state.value = _state.value.copy(ttsError = null)
+    }
+
+    // --------------------------------------------------------------- v0.6 STT
+
+    fun startListening() {
+        if (_state.value.listening) return
+        _state.value = _state.value.copy(listening = true, listeningError = null)
+        container.stt.start { event ->
+            viewModelScope.launch {
+                when (event) {
+                    is SttEvent.Listening -> _state.update { it.copy(listening = true, listeningError = null) }
+                    is SttEvent.Partial -> _state.update { it.copy(sttPartial = event.text) }
+                    is SttEvent.Result -> {
+                        _state.update {
+                            it.copy(listening = false, sttPartial = null, listeningError = null)
+                        }
+                        sendMessage(event.text)
+                    }
+                    is SttEvent.Error -> _state.update {
+                        it.copy(listening = false, sttPartial = null, listeningError = event.message)
+                    }
+                    is SttEvent.Processing -> _state.update { it.copy(listening = true) }
+                }
+            }
+        }
+    }
+
+    fun stopListening() {
+        container.stt.cancel()
+        _state.value = _state.value.copy(listening = false, sttPartial = null)
+    }
+
+    fun dismissListeningError() {
+        _state.value = _state.value.copy(listeningError = null)
+    }
+
+    // ------------------------------------------------------------ v0.6 history
+
+    fun renameSession(id: String, newTitle: String) {
+        viewModelScope.launch {
+            val ok = container.chatStore.rename(id, newTitle)
+            if (!ok) return@launch
+            val sessions = _state.value.sessions.map { session ->
+                if (session.id == id) session.copy(title = newTitle.trim(), updatedAt = System.currentTimeMillis()) else session
+            }.sortedByDescending { it.updatedAt }
+            _state.value = _state.value.copy(sessions = sessions)
+        }
+    }
+
+    fun exportSession(id: String) {
+        viewModelScope.launch {
+            container.chatStore.exportText(id)?.let { text ->
+                _state.value = _state.value.copy(exportText = text, exportTextId = id)
+            }
+        }
+    }
+
+    fun clearExport() {
+        _state.value = _state.value.copy(exportText = null, exportTextId = null)
+    }
+
     // ------------------------------------------------------------------ memory
 
     fun addMemory(text: String) {
         viewModelScope.launch {
-            val added = container.memory.add(text)
+            val result = container.memory.add(text)
+            val similar = container.memory.findSimilar(text)
+            val feedback = when (result) {
+                MemoryWriteResult.Added ->
+                    if (similar.isNotEmpty()) "Lo recordaré. Nota: hay un recuerdo parecido: \"${similar.first().text}\""
+                    else "Lo recordaré. 🧠"
+                else -> "Ya existía ese recuerdo."
+            }
             _state.value = _state.value.copy(
                 memories = container.memory.list(),
-                memoryFeedback = if (added) "Lo recordaré. 🧠" else "Ya existía ese recuerdo."
+                memoryFeedback = feedback
+            )
+        }
+    }
+
+    fun editMemory(id: String, newText: String) {
+        viewModelScope.launch {
+            val result = container.memory.edit(id, newText)
+            _state.value = _state.value.copy(
+                memories = container.memory.list(),
+                memoryFeedback = when (result) {
+                    MemoryWriteResult.Updated -> "Recuerdo actualizado."
+                    MemoryWriteResult.Duplicate -> "Ya existe un recuerdo con ese texto."
+                    else -> "No se pudo actualizar el recuerdo."
+                }
             )
         }
     }
@@ -290,8 +522,10 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         }
         else -> {
             MemoryIntent.saveText(text)?.let { toSave ->
-                val saved = container.memory.add(toSave)
-                if (saved) "Lo recordaré. 🧠\n\n\"$toSave\"" else "Ya recordaba eso. 🧠"
+                when (container.memory.add(toSave)) {
+                    MemoryWriteResult.Added -> "Lo recordaré. 🧠\n\n\"$toSave\""
+                    else -> "Ya recordaba eso. 🧠"
+                }
             } ?: MemoryIntent.forgetText(text)?.let { toForget ->
                 val removed = container.memory.removeContaining(toForget)
                 if (removed > 0) "He olvidado $removed recuerdo(s) sobre eso. 🧠"
@@ -329,10 +563,14 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
         streamingJob = viewModelScope.launch {
             val accumulated = StringBuilder()
+            _state.value = _state.value.copy(emotion = Emotion.GENERATING)
+            val messageId = withUser.id
             try {
                 val reply = container.chatRepository.streamReply(withUser) { delta ->
                     accumulated.append(delta)
                     updateStreamingPlaceholder(withUser.id, accumulated.toString())
+                    // Subtle haptic pulse per streamed fragment (throttled internally).
+                    if (delta.isNotBlank()) container.haptics.pulse()
                 }
                 finalizeAssistant(
                     sessionId = withUser.id,
@@ -344,17 +582,28 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                     promptTokens = reply.promptTokens,
                     completionTokens = reply.completionTokens
                 )
+                maybeAutoRead(messageId, reply.text)
             } catch (e: CancellationException) {
                 finalizeAssistant(withUser.id, accumulated.toString(), failed = false, errorText = null)
+                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL)
                 throw e
             } catch (e: OpenRouterException) {
                 val msg = e.message ?: "Error desconocido"
                 finalizeAssistant(withUser.id, msg, failed = true, errorText = msg)
+                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL)
             } catch (e: Exception) {
                 val msg = "Error inesperado: ${e.message ?: "desconocido"}"
                 finalizeAssistant(withUser.id, msg, failed = true, errorText = msg)
+                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL)
             }
         }
+    }
+
+    private fun maybeAutoRead(messageId: String, text: String) {
+        val current = _state.value
+        if (!current.autoRead || !current.ttsEnabled) return
+        if (text.isBlank() || current.ttsStatus is TtsStatus.Error) return
+        container.tts.speak(messageId, text, current.ttsRate)
     }
 
     private fun appendLocalExchange(userText: String, assistantText: String) {
@@ -385,7 +634,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             sessions = mutable,
             currentSessionId = session.id,
             messages = session.messages,
-            error = if (clearError) null else current.error
+            error = if (clearError) null else current.error,
+            messagesSent = session.messages.count { it.role == ChatRole.USER }
         )
         viewModelScope.launch { container.chatStore.upsert(session) }
     }
@@ -460,7 +710,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             sessions = sessions,
             messages = if (current.currentSessionId == sessionId) updatedSession.messages else current.messages,
             streaming = false,
-            error = errorText
+            error = errorText,
+            emotion = if (failed) Emotion.NEUTRAL else EmotionClassifier.classify(content)
         )
         container.chatStore.upsert(updatedSession)
     }

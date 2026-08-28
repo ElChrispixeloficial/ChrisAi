@@ -7,6 +7,7 @@ import com.chrispixel.chrisai.data.model.AiModel
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
 import com.chrispixel.chrisai.data.model.Memory
+import com.chrispixel.chrisai.data.personality.PersonalityPrompt
 import com.chrispixel.chrisai.data.remote.OpenRouterApi
 
 data class StreamReply(
@@ -18,10 +19,10 @@ data class StreamReply(
 )
 
 /**
- * Orchestrates requests to OpenRouter: builds the payload
- * (persona + only the relevant memory context + a trimmed history) and streams
- * the assistant reply, measuring latency and tokens and handling the memory
- * tags the model may emit.
+ * Orchestrates requests to OpenRouter: builds the payload with clearly separated
+ * blocks (security -> personality -> memory context -> trimmed history) and
+ * streams the assistant reply, measuring latency and tokens and handling the
+ * memory tags the model may emit.
  */
 class ChatRepository(
     private val api: OpenRouterApi,
@@ -41,8 +42,13 @@ class ChatRepository(
         val relevantMemories = relevantMemories(latestUser)
 
         val payload = buildList {
+            // 1) Fixed foundation: security/identity rules (always first and dominant).
             add(mapOf("role" to "system", "content" to Prompts.SYSTEM_PROMPT))
+            // 2) User-configurable personality (never overrides the rules above).
+            add(mapOf("role" to "system", "content" to PersonalityPrompt.block(settings.personality.value)))
+            // 3) Only the relevant memory context.
             add(mapOf("role" to "system", "content" to memory.asContext(relevantMemories)))
+            // 4) Trimmed conversation history + current message.
             session.messages
                 .takeLast(MAX_MESSAGES)
                 .filter { it.role != ChatRole.SYSTEM }

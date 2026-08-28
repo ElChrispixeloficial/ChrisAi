@@ -6,25 +6,77 @@ import com.chrispixel.chrisai.data.local.db.MemoryEntity
 import com.chrispixel.chrisai.data.model.Memory
 import java.util.UUID
 
+/** Result of adding/editing a memory, with v0.6 duplicate detection. */
+sealed class MemoryWriteResult {
+    object Added : MemoryWriteResult()
+    object Updated : MemoryWriteResult()
+    object Duplicate : MemoryWriteResult()
+    object NotFound : MemoryWriteResult()
+}
+
 /**
- * Persistent memories in Room v0.4: CRUD with IDs/timestamps and relevance
- * search so only pertinent memories are injected into the prompt.
+ * Persistent memories in Room v0.4+: CRUD with IDs/timestamps, relevance
+ * search and v0.6 duplicate detection (exact case-insensitive + similar).
  */
 class MemoryStore(private val db: AppDatabase) {
 
     suspend fun list(): List<Memory> = db.memoryDao().getAll().map { it.toDomain() }
 
-    /** Adds a new memory; returns false if it already exists (case-insensitive). */
-    suspend fun add(text: String): Boolean {
+    /** True when [text] already exists (case-insensitive exact match). */
+    suspend fun exists(text: String): Boolean {
+        val needle = text.trim().lowercase()
+        return db.memoryDao().getAll().any { it.text.lowercase() == needle }
+    }
+
+    /**
+     * Memories that are likely duplicating [text] (they share at least
+     * MIN_SIMILAR_WORDS significant words, ignoring stop words).
+     */
+    suspend fun findSimilar(text: String): List<Memory> {
+        val terms = significantTerms(text)
+        if (terms.size < 2) return emptyList()
+        return db.memoryDao()
+            .getAll()
+            .map { it.toDomain() }
+            .filter { memory ->
+                val memoryTerms = significantTerms(memory.text)
+                memoryTerms.count { it in terms } >= MIN_SIMILAR_WORDS
+            }
+    }
+
+    /**
+     * Adds a new memory. Returns [MemoryWriteResult.Duplicate] when the exact
+     * text already exists (case-insensitive); otherwise stores it.
+     */
+    suspend fun add(text: String): MemoryWriteResult {
         val normalized = text.trim()
-        if (normalized.isEmpty()) return false
+        if (normalized.isEmpty()) return MemoryWriteResult.Duplicate
+        if (exists(normalized)) return MemoryWriteResult.Duplicate
         val now = System.currentTimeMillis()
         val entity = MemoryEntity(id = UUID.randomUUID().toString(), text = normalized, createdAt = now, updatedAt = now)
         return try {
-            db.memoryDao().insert(entity) >= 0
+            db.memoryDao().insert(entity)
+            MemoryWriteResult.Added
         } catch (_: SQLiteConstraintException) {
-            false
+            MemoryWriteResult.Duplicate
         }
+    }
+
+    /**
+     * Edits an existing memory. Returns [MemoryWriteResult.Duplicate] when the
+     * new text collides with another memory, [MemoryWriteResult.NotFound] when
+     * the id does not exist.
+     */
+    suspend fun edit(id: String, newText: String): MemoryWriteResult {
+        val normalized = newText.trim()
+        if (normalized.isEmpty()) return MemoryWriteResult.Duplicate
+        val existing = db.memoryDao().getAll().firstOrNull { it.id == id } ?: return MemoryWriteResult.NotFound
+        val collision = db.memoryDao().getAll()
+            .any { it.id != id && it.text.lowercase() == normalized.lowercase() }
+        if (collision) return MemoryWriteResult.Duplicate
+        val now = System.currentTimeMillis()
+        db.memoryDao().update(existing.copy(text = normalized, updatedAt = now))
+        return MemoryWriteResult.Updated
     }
 
     /** Removes memories containing [text]. Returns how many were removed. */
@@ -72,4 +124,22 @@ class MemoryStore(private val db: AppDatabase) {
         createdAt = createdAt,
         updatedAt = updatedAt
     )
+
+    /** Lowercased significant words (length > 3, stops words removed). */
+    private fun significantTerms(text: String): Set<String> =
+        text.lowercase()
+            .split(Regex("[^\\p{L}\\p{N}]+"))
+            .filter { it.length > 3 }
+            .filterNot { it in STOP_WORDS }
+            .toSet()
+
+    private companion object {
+        const val MIN_SIMILAR_WORDS = 2
+        val STOP_WORDS = setOf(
+            "para", "esta", "este", "esto", "como", "cuando", "donde", "porque", "sobre",
+            "con", "del", "los", "las", "una", "unos", "unas", "que", "cual", "cuales",
+            "muy", "mas", "tambien", "puedes", "quiero", "necesito", "mira", "tiene",
+            "tienen", "siempre", "nunca", "todo", "toda", "todos", "todas", "cosa", "cosas"
+        )
+    }
 }

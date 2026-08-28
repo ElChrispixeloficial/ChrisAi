@@ -40,6 +40,40 @@ class ChatStore(private val db: AppDatabase) {
         db.withTransaction { db.conversationDao().deleteById(id) }
     }
 
+    /** Renames a conversation; returns false when the id does not exist. */
+    suspend fun rename(id: String, newTitle: String): Boolean {
+        val trimmed = newTitle.trim()
+        if (trimmed.isEmpty()) return false
+        val conversation = db.conversationDao().getById(id) ?: return false
+        db.conversationDao().upsert(
+            conversation.copy(title = trimmed.take(MaxTitleChars), updatedAt = System.currentTimeMillis())
+        )
+        return true
+    }
+
+    /** Plain-text export of a conversation for sharing (history v2.0). */
+    suspend fun exportText(id: String): String? {
+        val conversation = db.conversationDao().getById(id) ?: return null
+        val messages = db.messageDao().getBySession(id)
+        val sb = StringBuilder()
+        sb.append("Conversación: ").append(conversation.title).append('\n')
+        sb.append("Modelo: ").append(conversation.model.ifBlank { "modelo no definido" }).append('\n')
+        sb.append("==============================\n")
+        for (message in messages) {
+            val role = when (message.role) {
+                ChatRole.USER.apiValue -> "Chris"
+                ChatRole.ASSISTANT.apiValue -> "ChrisAI"
+                else -> "Sistema"
+            }
+            sb.append(role).append(": ").append(message.content.trim()).append("\n\n")
+        }
+        return sb.toString().trim()
+    }
+
+    private companion object {
+        const val MaxTitleChars = 60
+    }
+
     private suspend fun loadMessages(sessionId: String): List<ChatMessage> =
         db.messageDao().getBySession(sessionId).map { it.toDomain() }
 
