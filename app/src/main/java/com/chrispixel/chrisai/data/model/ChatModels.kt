@@ -1,0 +1,53 @@
+package com.chrispixel.chrisai.data.model
+
+import java.util.UUID
+
+enum class ChatRole {
+    SYSTEM,
+    USER,
+    ASSISTANT;
+
+    val apiValue: String
+        get() = when (this) {
+            SYSTEM -> "system"
+            USER -> "user"
+            ASSISTANT -> "assistant"
+        }
+
+    companion object {
+        fun fromApi(value: String): ChatRole = when (value) {
+            "system" -> SYSTEM
+            "assistant" -> ASSISTANT
+            else -> USER
+        }
+    }
+}
+
+data class ChatMessage(
+    val id: String = UUID.randomUUID().toString(),
+    val role: ChatRole,
+    val content: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val streamed: Boolean = false,
+    val failed: Boolean = false,
+    val latencyMs: Long? = null,
+    val totalMs: Long? = null,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null
+)
+
+data class ChatSession(
+    val id: String = UUID.randomUUID().toString(),
+    val title: String = "Nueva conversación",
+    val model: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+    val messages: List<ChatMessage> = emptyList()
+)
+
+data class AiModel(
+    val id: String,
+    val name: String,
+    val contextLength: Long = 0,
+    val promptPrice: String = ""
+)

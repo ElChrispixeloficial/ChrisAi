@@ -1,0 +1,7 @@
+# ninja log v5
+1	3961	1787873687	CMakeFiles/native-lib.dir/native-lib.cpp.o	566fdc75ff0f0dc3
+3963	4157	1787873687	/storage/internal_new/project/ChrisAi/app/build/intermediates/cxx/RelWithDebInfo/6f3262w5/obj/arm64-v8a/libnative-lib.so	3f86da413b026dd4
+2	3968	1787876971	CMakeFiles/chriscore.dir/chriscore.cpp.o	fa2966dd1e55a6f3
+3973	4135	1787876971	/storage/internal_new/project/ChrisAi/app/build/intermediates/cxx/RelWithDebInfo/6f3262w5/obj/arm64-v8a/libchriscore.so	e31b29c5c85e8e65
+383	5407	1787877374	CMakeFiles/chriscore.dir/chriscore.cpp.o	ed4bd96feb061284
+5408	5756	1787877375	/storage/internal_new/project/ChrisAi/app/build/intermediates/cxx/RelWithDebInfo/6f3262w5/obj/arm64-v8a/libchriscore.so	e7e37ba788395a94
