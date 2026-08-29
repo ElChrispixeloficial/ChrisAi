@@ -8,3 +8,13 @@
 
 # Avoid accidentally stripping Kotlin coroutines internals.
 -dontwarn org.jetbrains.annotations.**
+
+# JNI: the native `chriscore` module binds by exact names
+# (Java_com_chrispixel_chrisai_nativebridge_NativeBridge_*), so the bridge and
+# its `native` methods must keep their names, otherwise crypto/SSE/aurora break.
+-keep class com.chrispixel.chrisai.nativebridge.NativeBridge { native <methods>; }
+-keepclasseswithmembernames,includedescriptorclasses class * { native <methods>; }
+
+# Deeper aggressive bytecode optimization (safe: no reflection in this app).
+-allowaccessmodification
+-mergeinterfacesaggressively

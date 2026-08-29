@@ -32,8 +32,8 @@ android {
         applicationId = "com.chrispixel.chrisai"
         minSdk = 23
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.7.0"
+        versionCode = 8
+        versionName = "0.8.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -113,7 +113,17 @@ android {
 
     packaging {
         resources {
-            excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*")
+            excludes += setOf(
+                "/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*",
+                // Pure debug/IDE metadata; never used at runtime on-device.
+                "META-INF/version-control-info.textproto",
+                "kotlin-tooling-metadata.json"
+            )
+        }
+        jniLibs {
+            // Compress the native libs inside the APK (extract at install) to
+            // save ~150 KB; functionality is identical.
+            useLegacyPackaging = true
         }
     }
 }
