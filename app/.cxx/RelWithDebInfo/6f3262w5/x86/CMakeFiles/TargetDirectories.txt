@@ -1,3 +1,0 @@
-/storage/internal_new/project/ChrisAi/app/.cxx/RelWithDebInfo/6f3262w5/x86/CMakeFiles/native-lib.dir
-/storage/internal_new/project/ChrisAi/app/.cxx/RelWithDebInfo/6f3262w5/x86/CMakeFiles/edit_cache.dir
-/storage/internal_new/project/ChrisAi/app/.cxx/RelWithDebInfo/6f3262w5/x86/CMakeFiles/rebuild_cache.dir

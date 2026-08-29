@@ -16,3 +16,7 @@
 **/build/
 .kotlin
 /Tokens*.txt
+**/.cxx/
+/app-release.apk.sha256
+/Test/
+/dist/

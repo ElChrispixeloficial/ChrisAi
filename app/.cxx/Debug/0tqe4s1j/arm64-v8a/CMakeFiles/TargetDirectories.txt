@@ -1,3 +1,0 @@
-/storage/internal_new/project/ChrisAi/app/.cxx/Debug/0tqe4s1j/arm64-v8a/CMakeFiles/chriscore.dir
-/storage/internal_new/project/ChrisAi/app/.cxx/Debug/0tqe4s1j/arm64-v8a/CMakeFiles/edit_cache.dir
-/storage/internal_new/project/ChrisAi/app/.cxx/Debug/0tqe4s1j/arm64-v8a/CMakeFiles/rebuild_cache.dir

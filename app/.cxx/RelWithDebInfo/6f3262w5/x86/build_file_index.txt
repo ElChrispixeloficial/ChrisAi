@@ -1,1 +1,0 @@
-/storage/internal_new/project/ChrisAi/app/src/main/cpp/CMakeLists.txt
