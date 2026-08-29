@@ -32,9 +32,9 @@ android {
         applicationId = "com.chrispixel.chrisai"
         minSdk = 23
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.8.0"
+versionCode = 9
 
+        versionName = "0.8.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         val openrouterApiKey = readLocalProperty("OPENROUTER_API_KEY").orEmpty()

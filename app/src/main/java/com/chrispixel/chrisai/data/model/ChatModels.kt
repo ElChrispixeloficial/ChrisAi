@@ -33,7 +33,9 @@ data class ChatMessage(
     val latencyMs: Long? = null,
     val totalMs: Long? = null,
     val promptTokens: Int? = null,
-    val completionTokens: Int? = null
+    val completionTokens: Int? = null,
+    // v0.8.1: local path of a user-attached image (null for plain text).
+    val imagePath: String? = null
 )
 
 data class ChatSession(

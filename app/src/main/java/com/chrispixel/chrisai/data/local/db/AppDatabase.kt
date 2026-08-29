@@ -2,6 +2,8 @@ package com.chrispixel.chrisai.data.local.db
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
  * Local database for conversations, messages and persistent memories.
@@ -16,7 +18,7 @@ import androidx.room.RoomDatabase
         MessageEntity::class,
         MemoryEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -24,4 +26,13 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
     abstract fun messageDao(): MessageDao
     abstract fun memoryDao(): MemoryDao
+
+    companion object {
+        /** v2: user-attached images (absolute path per message). Non-destructive. */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN imagePath TEXT")
+            }
+        }
+    }
 }

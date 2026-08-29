@@ -124,7 +124,7 @@ class ChatRepository(
         latestUser: String?,
         relevantMemories: List<Memory>,
         emotionContext: String?
-    ): List<Map<String, String>> = buildList {
+    ): List<Map<String, Any>> = buildList {
         add(mapOf("role" to "system", "content" to Prompts.SYSTEM_PROMPT))
         add(mapOf("role" to "system", "content" to tools.schemas()))
         add(mapOf("role" to "system", "content" to PersonalityPrompt.block(settings.personality.value)))
@@ -132,20 +132,62 @@ class ChatRepository(
             add(mapOf("role" to "system", "content" to it))
         }
         add(mapOf("role" to "system", "content" to memory.asContext(relevantMemories)))
-        session.messages
+        val trimmed = session.messages
             .takeLast(MAX_MESSAGES)
             .filter { it.role != ChatRole.SYSTEM }
-            .forEach { message ->
-                add(mapOf("role" to message.role.apiValue, "content" to redact(trim(message.content))))
+        val lastUserIndex = trimmed.indexOfLast { it.role == ChatRole.USER }
+        trimmed.forEachIndexed { index, message ->
+            val content: Any = if (
+                message.role == ChatRole.USER &&
+                message.imagePath != null &&
+                index == lastUserIndex
+            ) {
+                visionContent(message)
+                    ?: redact(trim(message.content))
+            } else {
+                redact(trim(message.content))
             }
+            add(mapOf("role" to message.role.apiValue, "content" to content))
+        }
+    }
+
+    /**
+     * Builds a multimodal content array (text + data-URI image) for the image
+     * message. Returns null when the file is missing, too large, or unreadable
+     * so the caller falls back to a plain-text caption.
+     */
+    private fun visionContent(message: com.chrispixel.chrisai.data.model.ChatMessage): Any? {
+        val path = message.imagePath ?: return null
+        val file = java.io.File(path)
+        if (!file.exists() || !file.isFile) return null
+        if (!com.chrispixel.chrisai.data.vision.VisionMessage.isReasonableImageSize(file.length().toInt())) return null
+        return try {
+            val bytes = file.readBytes()
+            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            val prompt = message.content.ifBlank { "Analiza esta imagen y descríbela." }
+            com.chrispixel.chrisai.data.vision.VisionMessage.userContentArray(
+                base64Image = base64,
+                mimeType = mimeTypeOf(path),
+                prompt = prompt
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun mimeTypeOf(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
+        "png" -> "image/png"
+        "webp" -> "image/webp"
+        "gif" -> "image/gif"
+        else -> "image/jpeg"
     }
 
     /** Informs the model of the real outcome before asking for the final answer. */
     private fun buildRoundTwoPayload(
-        base: List<Map<String, String>>,
+        base: List<Map<String, Any>>,
         block: com.chrispixel.chrisai.data.tools.ToolCallBlock,
         report: ToolExecutionReport
-    ): List<Map<String, String>> = base + listOf(
+    ): List<Map<String, Any>> = base + listOf(
         mapOf("role" to "assistant", "content" to block.preamble.ifBlank { "Ejecuto la acción." }),
         mapOf(
             "role" to "user",

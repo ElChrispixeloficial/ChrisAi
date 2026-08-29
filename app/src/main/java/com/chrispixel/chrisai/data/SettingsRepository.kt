@@ -107,6 +107,26 @@ class SettingsRepository(
         .map { prefs -> prefs[KEY_STT_LANGUAGE].orEmpty() }
         .stateIn(scope, SharingStarted.Eagerly, "")
 
+    /** v0.8.1: voice call mode (continuous conversation loop), on by default. */
+    val callModeEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_CALL_MODE_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
+    /** v0.8.1: spoken greeting when a call starts, on by default. */
+    val callGreetingEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_CALL_GREETING_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
+    /** v0.8.1: keep listening automatically after each reply, on by default. */
+    val callContinuousEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_CALL_CONTINUOUS_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
+    /** v0.8.1: send images/vision messages, on by default. */
+    val imagesEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_IMAGES_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
     init {
         scope.launch { migrateLegacyPreferences() }
     }
@@ -180,6 +200,24 @@ class SettingsRepository(
 
     suspend fun setSttLanguage(language: String) {
         context.settingsDataStore.edit { it[KEY_STT_LANGUAGE] = language }
+    }
+
+    // ------------------------------------------------------- v0.8.1 features
+
+    suspend fun setCallModeEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_CALL_MODE_ENABLED] = enabled }
+    }
+
+    suspend fun setCallGreetingEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_CALL_GREETING_ENABLED] = enabled }
+    }
+
+    suspend fun setCallContinuousEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_CALL_CONTINUOUS_ENABLED] = enabled }
+    }
+
+    suspend fun setImagesEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_IMAGES_ENABLED] = enabled }
     }
 
     /** One-time import of the old SharedPreferences-based settings (v"1.0"). */
@@ -281,6 +319,10 @@ class SettingsRepository(
         val KEY_TTS_PITCH = floatPreferencesKey("tts_pitch")
         val KEY_TTS_VOICE = stringPreferencesKey("tts_voice")
         val KEY_STT_LANGUAGE = stringPreferencesKey("stt_language")
+        val KEY_CALL_MODE_ENABLED = booleanPreferencesKey("call_mode_enabled")
+        val KEY_CALL_GREETING_ENABLED = booleanPreferencesKey("call_greeting_enabled")
+        val KEY_CALL_CONTINUOUS_ENABLED = booleanPreferencesKey("call_continuous_enabled")
+        val KEY_IMAGES_ENABLED = booleanPreferencesKey("images_enabled")
         const val DEFAULT_TEMPERATURE = 0.7
         const val PLAIN_PREFIX = "plain:"
     }

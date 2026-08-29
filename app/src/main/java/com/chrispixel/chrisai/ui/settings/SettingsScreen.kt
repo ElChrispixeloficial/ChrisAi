@@ -125,6 +125,18 @@ fun SettingsScreen(vm: ChrisViewModel) {
             onAnimations = { vm.setAnimationsEnabled(it) }
         )
 
+        SectionHeader("Llamada y vision")
+        CallVisionSection(
+            callMode = state.callModeEnabled,
+            callGreeting = state.callGreetingEnabled,
+            callContinuous = state.callContinuousEnabled,
+            images = state.imagesEnabled,
+            onCallMode = { vm.setCallModeEnabled(it) },
+            onCallGreeting = { vm.setCallGreetingEnabled(it) },
+            onCallContinuous = { vm.setCallContinuousEnabled(it) },
+            onImages = { vm.setImagesEnabled(it) }
+        )
+
         SectionHeader("Memoria persistente")
         MemorySection(
             memories = state.memories,
@@ -534,6 +546,60 @@ private fun ExperienceSection(
     }
     Text(
         "Fondos de color según el estado de ChrisAI y transiciones suaves.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+@Composable
+private fun CallVisionSection(
+    callMode: Boolean,
+    callGreeting: Boolean,
+    callContinuous: Boolean,
+    images: Boolean,
+    onCallMode: (Boolean) -> Unit,
+    onCallGreeting: (Boolean) -> Unit,
+    onCallContinuous: (Boolean) -> Unit,
+    onImages: (Boolean) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Modo llamada", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Switch(checked = callMode, onCheckedChange = onCallMode)
+    }
+    Text(
+        "Muestra el botón 📞 en el chat para conversar por voz de forma continua.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    if (callMode) {
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Saludo inicial", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Switch(checked = callGreeting, onCheckedChange = onCallGreeting)
+        }
+        Text(
+            "ChrisAI te saluda al empezar cada llamada.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Escucha continua", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Switch(checked = callContinuous, onCheckedChange = onCallContinuous)
+        }
+        Text(
+            "Vuelve a escuchar automáticamente tras cada respuesta.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Envio de imagenes", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Switch(checked = images, onCheckedChange = onImages)
+    }
+    Text(
+        "Permite adjuntar fotos en el chat y que ChrisAI las analice.",
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )

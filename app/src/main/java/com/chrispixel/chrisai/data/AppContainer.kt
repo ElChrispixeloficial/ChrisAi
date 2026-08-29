@@ -26,7 +26,7 @@ class AppContainer(application: Application) {
         application,
         AppDatabase::class.java,
         "chrisai.db"
-    ).build()
+    ).addMigrations(AppDatabase.MIGRATION_1_2).build()
 
     val settings: SettingsRepository = SettingsRepository(application, appScope)
     val memory: MemoryStore = MemoryStore(database)

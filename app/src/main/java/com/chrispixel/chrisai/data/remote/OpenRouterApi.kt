@@ -63,9 +63,12 @@ class OpenRouterApi(
     /**
      * Streams a chat completion. Each content delta is delivered via [onDelta].
      * Measures time-to-first-token and total time; requests token usage.
+     *
+     * [messages] accepts either plain strings for "content" or real JSON arrays
+     * (multimodal image parts) built by [com.chrispixel.chrisai.data.vision.VisionMessage].
      */
     suspend fun streamChat(
-        messages: List<Map<String, String>>,
+        messages: List<Map<String, Any>>,
         model: String,
         apiKey: String,
         temperature: Double?,

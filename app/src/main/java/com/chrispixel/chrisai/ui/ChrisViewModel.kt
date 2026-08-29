@@ -1,6 +1,9 @@
 package com.chrispixel.chrisai.ui
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.chrispixel.chrisai.BuildConfig
@@ -9,6 +12,10 @@ import com.chrispixel.chrisai.data.emotion.Emotion
 import com.chrispixel.chrisai.data.emotion.EmotionClassifier
 import com.chrispixel.chrisai.data.emotion.EmotionEngine
 import com.chrispixel.chrisai.data.emotion.EmotionState
+import com.chrispixel.chrisai.data.live.LiveErrorReason
+import com.chrispixel.chrisai.data.live.LiveEvent
+import com.chrispixel.chrisai.data.live.LiveStage
+import com.chrispixel.chrisai.data.live.LiveStateMachine
 import com.chrispixel.chrisai.data.local.MemoryIntent
 import com.chrispixel.chrisai.data.local.MemoryWriteResult
 import com.chrispixel.chrisai.data.model.AiModel
@@ -23,14 +30,20 @@ import com.chrispixel.chrisai.data.speech.TtsStatus
 import com.chrispixel.chrisai.data.tools.ToolResultStatus
 import com.chrispixel.chrisai.data.tools.android.ToolEvent
 import com.chrispixel.chrisai.data.update.ReleaseInfo
+import com.chrispixel.chrisai.data.vision.VisionMessage
+import com.chrispixel.chrisai.data.vision.VisionSupport
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.UUID
 
 data class UpdateUiState(
     val checking: Boolean = false,
@@ -78,7 +91,17 @@ data class ChatUiState(
     val exportText: String? = null,
     val exportTextId: String? = null,
     // metric hops/aggregation (root totals across the current session)
-    val messagesSent: Int = 0
+    val messagesSent: Int = 0,
+    // v0.8.1: call mode (continuous voice conversation).
+    val callActive: Boolean = false,
+    val liveStage: LiveStage? = null,
+    val callModeEnabled: Boolean = true,
+    val callGreetingEnabled: Boolean = true,
+    val callContinuousEnabled: Boolean = true,
+    val imagesEnabled: Boolean = true,
+    // v0.8.1: pending image attachment (absolute path to a local JPEG).
+    val pendingImage: String? = null,
+    val imageError: String? = null
 )
 
 class ChrisViewModel(app: Application) : AndroidViewModel(app) {
@@ -89,6 +112,11 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     private var streamingJob: Job? = null
+
+    // v0.8.1: deterministic call/session state machine (Live infra, now wired).
+    private val live = LiveStateMachine()
+    private var callWaitJob: Job? = null
+    private var callPendingText: String? = null
 
     init {
         loadInitial()
@@ -116,6 +144,10 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 ttsPitch = container.settings.ttsPitch.value,
                 ttsVoice = container.settings.ttsVoice.value,
                 sttLanguage = container.settings.sttLanguage.value,
+                callModeEnabled = container.settings.callModeEnabled.value,
+                callGreetingEnabled = container.settings.callGreetingEnabled.value,
+                callContinuousEnabled = container.settings.callContinuousEnabled.value,
+                imagesEnabled = container.settings.imagesEnabled.value,
                 messagesSent = first?.messages?.count { it.role == ChatRole.USER } ?: 0
             )
             observeTts()
@@ -139,9 +171,13 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------ chat
 
     fun sendMessage(text: String) {
+        val current = _state.value
+        if (current.pendingImage != null) {
+            sendImageMessage(text.trim(), current.pendingImage)
+            return
+        }
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        val current = _state.value
         if (current.streaming) return
 
         if (container.settings.apiKey.value.isBlank()) {
@@ -155,9 +191,98 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             val localReply = handleMemoryIntent(trimmed)
             if (localReply != null) {
                 appendLocalExchange(trimmed, localReply)
+                if (_state.value.callActive) speakReplyAndLoop(localReply)
                 return@launch
             }
             startStreaming(trimmed)
+        }
+    }
+
+    /** Sends a user message with an attached image (multimodal/vision). */
+    private fun sendImageMessage(caption: String, imagePath: String) {
+        val current = _state.value
+        if (current.streaming) return
+        if (container.settings.apiKey.value.isBlank()) {
+            _state.value = current.copy(error = "No hay una API key disponible en esta build.")
+            return
+        }
+        if (!current.imagesEnabled) {
+            _state.value = current.copy(imageError = "El envío de imágenes está desactivado en Ajustes.")
+            return
+        }
+        val support = VisionMessage.support(current.selectedModel)
+        if (support == VisionSupport.NOT_SUPPORTED) {
+            _state.value = current.copy(
+                imageError = VisionMessage.unsupportedErrorMessage(current.selectedModel)
+            )
+            return
+        }
+        container.haptics.confirm()
+        _state.value = current.copy(pendingImage = null, imageError = null)
+        startStreaming(caption, imagePath)
+    }
+
+    fun attachImage(uri: Uri) {
+        val current = _state.value
+        if (!current.imagesEnabled) {
+            _state.value = current.copy(imageError = "El envío de imágenes está desactivado en Ajustes.")
+            return
+        }
+        val support = VisionMessage.support(current.selectedModel)
+        if (support == VisionSupport.NOT_SUPPORTED) {
+            _state.value = current.copy(
+                imageError = VisionMessage.unsupportedErrorMessage(current.selectedModel)
+            )
+            return
+        }
+        _state.value = current.copy(imageError = null)
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) { saveImageToFilesDir(uri) }
+            if (saved != null) {
+                _state.value = _state.value.copy(pendingImage = saved, imageError = null)
+                container.haptics.confirm()
+            } else {
+                _state.value = _state.value.copy(imageError = "No se pudo leer la imagen seleccionada.")
+            }
+        }
+    }
+
+    fun clearPendingImage() {
+        _state.value = _state.value.copy(pendingImage = null, imageError = null)
+    }
+
+    fun dismissImageError() {
+        _state.value = _state.value.copy(imageError = null)
+    }
+
+    /** Copies, downscales and compresses the picked image to app storage. */
+    private fun saveImageToFilesDir(uri: Uri): String? {
+        return try {
+            val resolver = getApplication<Application>().contentResolver
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val maxDim = maxOf(bitmap.width, bitmap.height)
+            val scale = if (maxDim > MAX_IMAGE_DIM) maxDim.toFloat() / MAX_IMAGE_DIM else 1f
+            val out: Bitmap = if (scale > 1f) {
+                Bitmap.createScaledBitmap(
+                    bitmap,
+                    (bitmap.width / scale).toInt().coerceAtLeast(1),
+                    (bitmap.height / scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                bitmap
+            }
+            val dir = File(getApplication<Application>().filesDir, ATTACH_DIR).apply { mkdirs() }
+            val file = File(dir, "${UUID.randomUUID()}.jpg")
+            file.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            if (out !== bitmap) {
+                bitmap.recycle()
+                out.recycle()
+            }
+            file.absolutePath
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -307,6 +432,30 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         if (!enabled) container.tts.stop()
     }
 
+    // -------------------------------------------------- v0.8.1 feature flags
+
+    fun setCallModeEnabled(enabled: Boolean) {
+        if (!enabled && _state.value.callActive) endCall()
+        viewModelScope.launch { container.settings.setCallModeEnabled(enabled) }
+        _state.value = _state.value.copy(callModeEnabled = enabled)
+    }
+
+    fun setCallGreetingEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setCallGreetingEnabled(enabled) }
+        _state.value = _state.value.copy(callGreetingEnabled = enabled)
+    }
+
+    fun setCallContinuousEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setCallContinuousEnabled(enabled) }
+        _state.value = _state.value.copy(callContinuousEnabled = enabled)
+    }
+
+    fun setImagesEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setImagesEnabled(enabled) }
+        _state.value = _state.value.copy(imagesEnabled = enabled)
+        if (!enabled) clearPendingImage()
+    }
+
     // --------------------------------------------------------------- v0.6 TTS
 
     fun setTtsEnabled(enabled: Boolean) {
@@ -411,6 +560,242 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissListeningError() {
         _state.value = _state.value.copy(listeningError = null)
+    }
+
+    // ------------------------------------------------------- v0.8.1 call mode
+
+    /** Starts or ends the voice call (continuous conversation). */
+    fun toggleCall() {
+        if (_state.value.callActive) endCall() else startCall()
+    }
+
+    /** Wired stream of the deterministic Live session state (v0.8 infra). */
+    private fun syncLiveStage() {
+        _state.value = _state.value.copy(liveStage = live.state.stage)
+    }
+
+    private fun startCall() {
+        val current = _state.value
+        if (current.callActive || !current.callModeEnabled) return
+        if (current.streaming) stopStreaming()
+
+        live.on(LiveEvent.Start)
+        _state.value = current.copy(
+            callActive = true,
+            liveStage = live.state.stage,
+            listening = false,
+            listeningError = null,
+            sttPartial = null,
+            error = null
+        )
+        container.haptics.confirm()
+
+        val greetingWanted = current.ttsEnabled && current.callGreetingEnabled
+        if (greetingWanted && container.tts.available()) {
+            container.tts.speakWithEmotion(
+                CALL_UTTERANCE_ID,
+                CALL_GREETING,
+                current.ttsRate,
+                current.ttsPitch,
+                Emotion.NEUTRAL
+            )
+            waitForUtteranceThenListen()
+        } else if (greetingWanted) {
+            container.tts.initialize { result ->
+                if (result is com.chrispixel.chrisai.data.speech.TtsController.InitResult.Ok) {
+                    container.tts.speakWithEmotion(
+                        CALL_UTTERANCE_ID,
+                        CALL_GREETING,
+                        _state.value.ttsRate,
+                        _state.value.ttsPitch,
+                        Emotion.NEUTRAL
+                    )
+                    waitForUtteranceThenListen()
+                } else {
+                    armCallListening()
+                }
+            }
+        } else {
+            armCallListening()
+        }
+    }
+
+    fun endCall() {
+        if (!_state.value.callActive) return
+        callWaitJob?.cancel()
+        callPendingText = null
+        if (_state.value.streaming) {
+            streamingJob?.cancel()
+            viewModelScope.launch { container.api.cancelActiveCall() }
+        }
+        container.tts.stop()
+        container.stt.cancel()
+        live.on(LiveEvent.End)
+        _state.value = _state.value.copy(
+            callActive = false,
+            liveStage = null,
+            listening = false,
+            sttPartial = null,
+            listeningError = null
+        )
+    }
+
+    /** Waits for the current TTS utterance to finish, then re-listens. */
+    private fun waitForUtteranceThenListen() {
+        callWaitJob?.cancel()
+        callWaitJob = viewModelScope.launch {
+            try {
+                container.tts.status.first { status ->
+                    status is TtsStatus.Idle ||
+                        status is TtsStatus.Error ||
+                        status is TtsStatus.Unavailable ||
+                        status is TtsStatus.Paused
+                }
+            } catch (_: CancellationException) {
+                return@launch
+            }
+            val current = _state.value
+            if (!current.callActive) return@launch
+            live.on(LiveEvent.TtsFinished)
+            syncLiveStage()
+            if (!current.callContinuousEnabled) return@launch
+            armCallListening()
+        }
+    }
+
+    /** Arms STT for the current call turn (no-op while streaming/generating). */
+    private fun armCallListening() {
+        val current = _state.value
+        if (!current.callActive || current.listening) return
+        if (current.streaming) return
+
+        _state.value = current.copy(listening = true, listeningError = null, sttPartial = null)
+        val ok = container.stt.start { event -> handleCallStt(event) }
+        if (!ok) {
+            live.on(LiveEvent.Failure(LiveErrorReason.STT_FAILED))
+            syncLiveStage()
+            _state.value = _state.value.copy(listening = false)
+            handleCallFailure("Este dispositivo no tiene reconocimiento de voz.")
+        }
+    }
+
+    /** Renders STT events inside an active call. */
+    private fun handleCallStt(event: SttEvent) {
+        viewModelScope.launch {
+            when (event) {
+                is SttEvent.Listening -> _state.update {
+                    it.copy(listening = true, listeningError = null)
+                }
+                is SttEvent.Partial -> _state.update { it.copy(sttPartial = event.text) }
+                is SttEvent.Result -> {
+                    _state.update {
+                        it.copy(listening = false, sttPartial = null, listeningError = null)
+                    }
+                    live.on(LiveEvent.TranscriptionReady)
+                    live.rememberUserText(event.text)
+                    syncLiveStage()
+
+                    // Barge-in while a reply is still streaming: queue and send
+                    // after it finishes, mirroring a real call.
+                    if (_state.value.streaming) {
+                        callPendingText = event.text
+                    } else {
+                        sendMessage(event.text)
+                    }
+                }
+                is SttEvent.Processing -> _state.update { it.copy(listening = true) }
+                is SttEvent.Error -> {
+                    _state.update {
+                        it.copy(listening = false, sttPartial = null, listeningError = event.message)
+                    }
+                    live.on(LiveEvent.Failure(errorReason(event.message)))
+                    syncLiveStage()
+                    handleCallFailure(event.message)
+                }
+            }
+        }
+    }
+
+    private fun errorReason(message: String): LiveErrorReason = when {
+        message.contains("No se entendió") -> LiveErrorReason.STT_NO_MATCH
+        message.contains("No se detectó voz") -> LiveErrorReason.STT_TIMEOUT
+        message.contains("permiso", ignoreCase = true) -> LiveErrorReason.NO_MIC_PERMISSION
+        message.contains("reconocimiento") -> LiveErrorReason.STT_FAILED
+        else -> LiveErrorReason.STT_FAILED
+    }
+
+    /** Bounded retries while the user stays silent; stops at the state machine's bound. */
+    private fun handleCallFailure(message: String) {
+        if (!_state.value.callActive) return
+        if (live.lockedOut) {
+            _state.value = _state.value.copy(
+                listening = false,
+                liveStage = live.state.stage,
+                listeningError = LiveErrorReason.TOO_MANY_FAILURES.message
+            )
+            return
+        }
+        if (!_state.value.callContinuousEnabled) return
+        // Go back to LISTENING unless the machine rejected it (too many failures).
+        live.on(LiveEvent.ListenAgain)
+        syncLiveStage()
+        if (live.state.stage == LiveStage.LISTENING) armCallListening()
+    }
+
+    /** After a reply finished (streamed or local): speak it, then re-listen. */
+    private fun handleCallReply(messageId: String, text: String, emotionState: EmotionState?) {
+        live.on(LiveEvent.GenerationFinished)
+        syncLiveStage()
+        speakReplyAndLoop(text)
+    }
+
+    /** Speaks a call reply (or falls back to text) and continues the loop. */
+    private fun speakReplyAndLoop(text: String) {
+        val current = _state.value
+        if (!current.callActive) return
+        if (handleBargeInQueue()) return
+
+        if (current.ttsEnabled && text.isNotBlank()) {
+            val emotion = current.emotion
+            container.tts.speakWithEmotion(
+                CALL_UTTERANCE_ID,
+                text,
+                current.ttsRate,
+                current.ttsPitch,
+                emotion
+            )
+            waitForUtteranceThenListen()
+        } else {
+            live.on(LiveEvent.TtsFinished)
+            syncLiveStage()
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(250)
+                if (_state.value.callActive && _state.value.callContinuousEnabled) armCallListening()
+            }
+        }
+    }
+
+    /** If the user spoke while the model was still writing, answer that now. */
+    private fun handleBargeInQueue(): Boolean {
+        val pending = callPendingText
+        callPendingText = null
+        if (pending != null && pending.isNotBlank()) {
+            sendMessage(pending)
+            return true
+        }
+        return false
+    }
+
+    /** Tap the mic during a call = barge in and speak immediately. */
+    fun interruptCall() {
+        if (!_state.value.callActive) return
+        callWaitJob?.cancel()
+        container.tts.stop()
+        live.on(LiveEvent.BargeIn)
+        live.on(LiveEvent.Interrupt)
+        live.on(LiveEvent.ListenAgain)
+        syncLiveStage()
+        if (live.state.stage == LiveStage.LISTENING) armCallListening()
     }
 
     // ------------------------------------------------------------ v0.6 history
@@ -578,21 +963,23 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun startStreaming(text: String) {
+    private fun startStreaming(text: String, imagePath: String? = null) {
         val current = _state.value
         val model = current.selectedModel
         val now = System.currentTimeMillis()
         val previousEmotion = current.emotionState
+        if (current.callActive) live.on(LiveEvent.GenerationStarted)
 
         val base: ChatSession = current.currentSessionId
             ?.let { id -> current.sessions.firstOrNull { it.id == id } }
             ?: ChatSession(model = model, createdAt = now)
 
+        val titleSource = text.ifBlank { "📷 Imagen" }
         val withUser = base.copy(
-            title = if (base.messages.isEmpty()) text.take(TITLE_MAX_CHARS) else base.title,
+            title = if (base.messages.isEmpty()) titleSource.take(TITLE_MAX_CHARS) else base.title,
             model = model,
             updatedAt = now,
-            messages = base.messages + ChatMessage(role = ChatRole.USER, content = text)
+            messages = base.messages + ChatMessage(role = ChatRole.USER, content = text, imagePath = imagePath)
         )
         commit(withUser, clearError = true)
         addStreamingPlaceholder(withUser.id)
@@ -641,7 +1028,11 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                     completionTokens = reply.completionTokens,
                     emotionState = emotionState
                 )
-                maybeAutoRead(messageId, reply.text, emotionState)
+                if (_state.value.callActive) {
+                    handleCallReply(messageId, reply.text, emotionState)
+                } else {
+                    maybeAutoRead(messageId, reply.text, emotionState)
+                }
             } catch (e: CancellationException) {
                 finalizeAssistant(withUser.id, accumulated.toString(), failed = false, errorText = null)
                 _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
@@ -650,10 +1041,12 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 val msg = e.message ?: "Error desconocido"
                 finalizeAssistant(withUser.id, msg, failed = true, errorText = msg)
                 _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
+                if (_state.value.callActive) handleCallReply(messageId, msg, null)
             } catch (e: Exception) {
                 val msg = "Error inesperado: ${e.message ?: "desconocido"}"
                 finalizeAssistant(withUser.id, msg, failed = true, errorText = msg)
                 _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
+                if (_state.value.callActive) handleCallReply(messageId, msg, null)
             }
         }
     }
@@ -801,5 +1194,9 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val PLACEHOLDER_ID = "__streaming_placeholder__"
         const val TITLE_MAX_CHARS = 45
+        const val CALL_UTTERANCE_ID = "__call_utterance__"
+        const val CALL_GREETING = "Hola, ¿qué necesitas?"
+        const val ATTACH_DIR = "attachments"
+        const val MAX_IMAGE_DIM = 1280
     }
 }

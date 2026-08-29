@@ -32,6 +32,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -57,6 +58,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -67,14 +69,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.content.pm.PackageManager
 import android.Manifest
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.chrispixel.chrisai.data.emotion.Emotion
+import com.chrispixel.chrisai.data.live.LiveStage
 import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.speech.TtsStatus
@@ -104,6 +110,13 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
         if (granted) vm.startListening()
     }
 
+    // v0.8.1: system photo picker (no storage permission needed).
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        uri?.let { vm.attachImage(it) }
+    }
+
     // STT partial text flows into the composer while listening.
     LaunchedEffect(state.sttPartial) {
         state.sttPartial?.let { input = it }
@@ -111,7 +124,10 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
 
     // Clean up speech on leave.
     DisposableEffect(Unit) {
-        onDispose { vm.stopListening() }
+        onDispose {
+            vm.stopListening()
+            if (state.callActive) vm.endCall()
+        }
     }
 
     LaunchedEffect(state.messages.size, state.streaming) {
@@ -134,15 +150,23 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
                 onInputChange = { input = it },
                 streaming = state.streaming,
                 listening = state.listening,
+                imagesEnabled = state.imagesEnabled,
+                pendingImage = state.pendingImage,
+                onPickImage = {
+                    imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+                onClearImage = { vm.clearPendingImage() },
                 onSend = {
-                    if (input.isNotBlank()) {
+                    if (input.isNotBlank() || state.pendingImage != null) {
                         vm.sendMessage(input)
                         input = ""
                     }
                 },
                 onStop = { vm.stopStreaming() },
                 onMicClick = {
-                    if (micPermissionGranted) {
+                    if (state.callActive) {
+                        vm.interruptCall()
+                    } else if (micPermissionGranted) {
                         if (state.listening) vm.stopListening() else vm.startListening()
                     } else {
                         permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -156,6 +180,14 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            if (state.callModeEnabled) {
+                CallBar(
+                    active = state.callActive,
+                    stage = state.liveStage,
+                    onToggle = { vm.toggleCall() },
+                    onInterrupt = { vm.interruptCall() }
+                )
+            }
             if (state.error != null) {
                 ErrorBanner(message = state.error!!, onDismiss = { vm.dismissError() })
             }
@@ -528,12 +560,25 @@ private fun MessageBubble(
                     }
                 }
                 isUser -> {
-                    SelectionContainer {
-                        Text(
-                            message.content,
-                            style = MaterialTheme.typography.bodyLarge,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                        )
+                    Column {
+                        message.imagePath?.let { path ->
+                            AttachedImageThumb(
+                                path = path,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            )
+                        }
+                        SelectionContainer {
+                            Text(
+                                message.content,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.padding(
+                                    start = 14.dp,
+                                    end = 14.dp,
+                                    top = if (message.imagePath != null) 0.dp else 10.dp,
+                                    bottom = 10.dp
+                                )
+                            )
+                        }
                     }
                 }
                 else -> {
@@ -635,18 +680,49 @@ private fun ChatInputBar(
     onInputChange: (String) -> Unit,
     streaming: Boolean,
     listening: Boolean,
+    imagesEnabled: Boolean,
+    pendingImage: String?,
+    onPickImage: () -> Unit,
+    onClearImage: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onMicClick: () -> Unit
 ) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Column {
+            if (pendingImage != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "📷 Imagen lista para enviar",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = onClearImage) {
+                        Icon(Icons.Filled.Close, contentDescription = "Quitar imagen")
+                    }
+                }
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
+                if (imagesEnabled) {
+                    IconButton(onClick = onPickImage) {
+                        Text(
+                            "🖼️",
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.alpha(0.7f)
+                        )
+                    }
+                }
                 IconButton(onClick = onMicClick) {
                     Text(
                         "🎙️",
@@ -677,4 +753,79 @@ private fun ChatInputBar(
             }
         }
     }
+}
+
+@Composable
+private fun AttachedImageThumb(path: String, modifier: Modifier = Modifier) {
+    var bitmap by remember(path) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(path) {
+        bitmap = withContext(Dispatchers.IO) {
+            try {
+                BitmapFactory.decodeFile(path)?.asImageBitmap()
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+    bitmap?.let { bmp ->
+        Image(
+            bitmap = bmp,
+            contentDescription = "Imagen adjunta",
+            modifier = modifier
+                .fillMaxWidth(0.6f)
+                .clip(RoundedCornerShape(12.dp)),
+            contentScale = ContentScale.Crop
+        )
+    }
+}
+
+@Composable
+private fun CallBar(
+    active: Boolean,
+    stage: LiveStage?,
+    onToggle: () -> Unit,
+    onInterrupt: () -> Unit
+) {
+    Surface(
+        color = if (active) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (active) stageLabel(stage) else "📞 Llamada de voz",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            if (active) {
+                TextButton(onClick = onInterrupt) {
+                    Text("🎙️", style = MaterialTheme.typography.bodyLarge)
+                }
+                Button(onClick = onToggle) {
+                    Text("Colgar")
+                }
+            } else {
+                OutlinedButton(onClick = onToggle) {
+                    Text("Llamar")
+                }
+            }
+        }
+    }
+}
+
+private fun stageLabel(stage: LiveStage?): String = when (stage) {
+    LiveStage.LISTENING -> "🎙️ Escuchando…"
+    LiveStage.THINKING -> "💭 Procesando…"
+    LiveStage.GENERATING -> "✍️ Escribiendo…"
+    LiveStage.SPEAKING -> "🔊 Hablando…"
+    LiveStage.INTERRUPTED -> "✋ Interrumpido"
+    LiveStage.ERROR -> "⚠️ Llamada detenida"
+    null, LiveStage.IDLE -> "En llamada"
 }

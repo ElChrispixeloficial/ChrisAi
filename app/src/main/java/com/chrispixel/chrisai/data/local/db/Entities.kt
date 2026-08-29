@@ -37,7 +37,9 @@ data class MessageEntity(
     val latencyMs: Long?,
     val totalMs: Long?,
     val promptTokens: Int?,
-    val completionTokens: Int?
+    val completionTokens: Int?,
+    // v0.8.1: absolute path of the attached image file (null for text-only).
+    val imagePath: String?
 )
 
 @Entity(tableName = "memories", indices = [Index(value = ["text"], unique = true)])

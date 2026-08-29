@@ -38,6 +38,18 @@ object VisionMessage {
         return JSONObject().put("role", "user").put("content", content).toString()
     }
 
+    /**
+     * Content parts (OpenAI-compatible) for a single multimodal user message.
+     * Used internally by [ChatRepository] so the request can embed the image
+     * as a real array part instead of a string.
+     */
+    fun userContentArray(base64Image: String, mimeType: String?, prompt: String): JSONArray {
+        val mime = mimeType?.takeIf { it.startsWith("image/") } ?: "image/jpeg"
+        return JSONArray()
+            .put(JSONObject().put("type", "text").put("text", prompt))
+            .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:$mime;base64,$base64Image")))
+    }
+
     /** Structural check: has a text part and an image_url part with a data: URI. */
     fun isValidVisionMessage(json: String): Boolean {
         return try {

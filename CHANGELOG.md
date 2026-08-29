@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.8.1 — Llamada de voz, envio de imagenes y ajustes (actual)
+
+- **Modo llamada** (boton 📞 en el chat): conversacion de voz continua con loop
+  saludo → escucha → procesa → responde → vuelve a escuchar. `LiveStateMachine`
+  por fin conectada al ViewModel (en v0.8.0 existia la infraestructura sin wiring).
+  Barge-in: si hablas mientras ChrisAI escribe, tu mensaje se encola y se responde
+  antes de seguir; boton de interrupcion manual; el estado se muestra en la barra
+  (escuchando/procesando/hablando).
+- **Envio de imagenes** (vision): boton 🖼️ con selector de fotos del sistema (sin
+  permisos de almacenamiento), vista previa antes de enviar, downscale a 1280 px /
+  JPEG 80 en `filesDir/attachments/`, y el contenido se manda al modelo como array
+  multimodal (`text` + `image_url` base64) mediante `VisionMessage.userContentArray`
+  (antes VisionMessage era solo modelo sin integracion real). Room migra a v2 con
+  `ALTER TABLE messages ADD COLUMN imagePath TEXT` (no destructiva).
+- **Ajustes**: nueva seccion "Llamada y vision" con 4 conmutadores — Modo llamada,
+  Saludo inicial, Escucha continua y Envio de imagenes, todos configurables y por
+  defecto activados (v0.8.1: cada funcion nueva configurable desde Ajustes).
+- **Correcciones**: `OpenRouterApi.streamChat` acepta contenido multimodal
+  (`List<Map<String, Any>>`); payload del chat tipado para vision; al inhabilitar
+  una funcion se revierte el estado en marcha (colgar llamada / quitar imagen).
+- versionCode 9.
+- **Tests**: 125 unit tests verdes (existente); la capa multimodal y de llamada no
+  introduce dependencias nuevas.
+
 ## v0.7.0 — TTS 2.0, ChrisTools y emociones computacionales (2026-08-29)
 
 - **TTS 2.0** (`TtsText.kt`): pipeline de limpieza de texto hablado que nunca modifica el mensaje visible:
