@@ -92,6 +92,11 @@ class SettingsRepository(
         .map { prefs -> prefs[KEY_TTS_RATE]?.coerceIn(0.5f, 2.0f) ?: 1.0f }
         .stateIn(scope, SharingStarted.Eagerly, 1.0f)
 
+    /** TTS pitch multiplier (0.5..2.0, v0.7). */
+    val ttsPitch: StateFlow<Float> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_TTS_PITCH]?.coerceIn(0.5f, 2.0f) ?: 1.0f }
+        .stateIn(scope, SharingStarted.Eagerly, 1.0f)
+
     /** Preferred TTS voice name (empty = system default). */
     val ttsVoice: StateFlow<String> = context.settingsDataStore.data
         .map { prefs -> prefs[KEY_TTS_VOICE].orEmpty() }
@@ -163,6 +168,10 @@ class SettingsRepository(
 
     suspend fun setTtsRate(rate: Float) {
         context.settingsDataStore.edit { it[KEY_TTS_RATE] = rate.coerceIn(0.5f, 2.0f) }
+    }
+
+    suspend fun setTtsPitch(pitch: Float) {
+        context.settingsDataStore.edit { it[KEY_TTS_PITCH] = pitch.coerceIn(0.5f, 2.0f) }
     }
 
     suspend fun setTtsVoice(voiceName: String) {
@@ -269,6 +278,7 @@ class SettingsRepository(
         val KEY_AUTO_READ = booleanPreferencesKey("auto_read")
         val KEY_TTS_ENABLED = booleanPreferencesKey("tts_enabled")
         val KEY_TTS_RATE = floatPreferencesKey("tts_rate")
+        val KEY_TTS_PITCH = floatPreferencesKey("tts_pitch")
         val KEY_TTS_VOICE = stringPreferencesKey("tts_voice")
         val KEY_STT_LANGUAGE = stringPreferencesKey("stt_language")
         const val DEFAULT_TEMPERATURE = 0.7

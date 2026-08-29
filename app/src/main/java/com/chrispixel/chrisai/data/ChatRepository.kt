@@ -9,26 +9,40 @@ import com.chrispixel.chrisai.data.model.ChatSession
 import com.chrispixel.chrisai.data.model.Memory
 import com.chrispixel.chrisai.data.personality.PersonalityPrompt
 import com.chrispixel.chrisai.data.remote.OpenRouterApi
+import com.chrispixel.chrisai.data.tools.ToolCallParser
+import com.chrispixel.chrisai.data.tools.ToolExecutionReport
+import com.chrispixel.chrisai.data.tools.ToolResultStatus
+import com.chrispixel.chrisai.data.tools.android.ToolEvent
+import com.chrispixel.chrisai.data.tools.android.ToolManager
 
 data class StreamReply(
     val text: String,
     val latencyMs: Long?,
     val totalMs: Long?,
     val promptTokens: Int?,
-    val completionTokens: Int?
+    val completionTokens: Int?,
+    // v0.7 ChrisTools: live indicator events + aggregate result.
+    val toolEvents: List<ToolEvent> = emptyList(),
+    val toolSucceeded: Boolean = false,
+    val toolCallCount: Int = 0
 )
 
 /**
  * Orchestrates requests to OpenRouter: builds the payload with clearly separated
- * blocks (security -> personality -> memory context -> trimmed history) and
- * streams the assistant reply, measuring latency and tokens and handling the
- * memory tags the model may emit.
+ * blocks (security -> tools -> personality -> emotion context -> memory context ->
+ * trimmed history) and streams the assistant reply, measuring latency and tokens.
+ *
+ * v0.7: when the model emits a [TOOLS] envelope at the end of its text, the block
+ * is parsed, validated and executed through [ToolManager] (never fallible,
+ * arbitrary code), the visible preamble is preserved, and a second model pass
+ * produces the final answer informed by the real execution report.
  */
 class ChatRepository(
     private val api: OpenRouterApi,
     private val chatStore: ChatStore,
     private val settings: SettingsRepository,
-    private val memory: MemoryStore
+    private val memory: MemoryStore,
+    private val tools: ToolManager
 ) {
 
     private val apiKey get() = settings.apiKey.value
@@ -36,46 +50,145 @@ class ChatRepository(
     /** Streams a reply for [session]. Returns the cleaned text plus metrics. */
     suspend fun streamReply(
         session: ChatSession,
-        onDelta: (String) -> Unit
+        onDelta: (String) -> Unit,
+        emotionContext: String? = null
     ): StreamReply {
         val latestUser = session.messages.lastOrNull { it.role == ChatRole.USER }?.content
         val relevantMemories = relevantMemories(latestUser)
 
-        val payload = buildList {
-            // 1) Fixed foundation: security/identity rules (always first and dominant).
-            add(mapOf("role" to "system", "content" to Prompts.SYSTEM_PROMPT))
-            // 2) User-configurable personality (never overrides the rules above).
-            add(mapOf("role" to "system", "content" to PersonalityPrompt.block(settings.personality.value)))
-            // 3) Only the relevant memory context.
-            add(mapOf("role" to "system", "content" to memory.asContext(relevantMemories)))
-            // 4) Trimmed conversation history + current message.
-            session.messages
-                .takeLast(MAX_MESSAGES)
-                .filter { it.role != ChatRole.SYSTEM }
-                .forEach { message ->
-                    add(mapOf("role" to message.role.apiValue, "content" to redact(trim(message.content))))
-                }
-        }
+        val basePayload = buildPayload(session, latestUser, relevantMemories, emotionContext)
 
-        val result = api.streamChat(
-            messages = payload,
+        // Round 1: stream through a filter that hides any [TOOLS] envelope live.
+        val roundOne = VisibleFilter(onDelta)
+        val first = api.streamChat(
+            messages = basePayload,
             model = session.model.ifBlank { settings.model.value },
             apiKey = apiKey,
             temperature = settings.temperature.value,
-            onDelta = onDelta
+            onDelta = roundOne::accept
         )
 
-        val tagged = MemoryIntent.parseTags(result.text)
+        val block = ToolCallParser.parse(first.text)
+        val wantsTools = block?.calls?.isNotEmpty() == true
+
+        var finalText: String
+        var totalLatency = first.latencyMs
+        var totalTotal = first.totalMs
+        var totalPrompt = first.promptTokens
+        var totalCompletion = first.completionTokens
+        val toolEvents = mutableListOf<ToolEvent>()
+
+        if (!wantsTools || block == null) {
+            // Assistant answer without tool calls (or a stray marker).
+            finalText = ToolCallParser.visibleText(first.text)
+        } else {
+            finalText = block.preamble
+            val report = tools.execute(block) { toolEvents += it }
+            if (report != null) {
+                val roundTwoPayload = buildRoundTwoPayload(basePayload, block, report)
+                val roundTwo = api.streamChat(
+                    messages = roundTwoPayload,
+                    model = session.model.ifBlank { settings.model.value },
+                    apiKey = apiKey,
+                    temperature = settings.temperature.value,
+                    onDelta = onDelta
+                )
+                val finalVisible = ToolCallParser.visibleText(roundTwo.text)
+                if (finalVisible.isNotBlank()) finalText = finalVisible
+                totalLatency = sumNullable(totalLatency, roundTwo.latencyMs)
+                totalTotal = sumNullable(totalTotal, roundTwo.totalMs)
+                totalPrompt = sumNullable(totalPrompt, roundTwo.promptTokens)
+                totalCompletion = sumNullable(totalCompletion, roundTwo.completionTokens)
+            }
+        }
+
+        val tagged = MemoryIntent.parseTags(finalText)
         tagged.toSave.forEach { memory.add(it) }
         tagged.toForget.forEach { memory.removeContaining(it) }
 
         return StreamReply(
             text = tagged.cleaned,
-            latencyMs = result.latencyMs,
-            totalMs = result.totalMs,
-            promptTokens = result.promptTokens,
-            completionTokens = result.completionTokens
+            latencyMs = totalLatency,
+            totalMs = totalTotal,
+            promptTokens = totalPrompt,
+            completionTokens = totalCompletion,
+            toolEvents = toolEvents,
+            toolSucceeded = toolEvents.any { it.status == ToolResultStatus.SUCCESS },
+            toolCallCount = toolEvents.count { it.status != ToolResultStatus.RUNNING }
         )
+    }
+
+    /** System/Safety -> tools schemas -> personality -> emotion -> memory -> history. */
+    private fun buildPayload(
+        session: ChatSession,
+        latestUser: String?,
+        relevantMemories: List<Memory>,
+        emotionContext: String?
+    ): List<Map<String, String>> = buildList {
+        add(mapOf("role" to "system", "content" to Prompts.SYSTEM_PROMPT))
+        add(mapOf("role" to "system", "content" to tools.schemas()))
+        add(mapOf("role" to "system", "content" to PersonalityPrompt.block(settings.personality.value)))
+        emotionContext?.takeIf { it.isNotBlank() }?.let {
+            add(mapOf("role" to "system", "content" to it))
+        }
+        add(mapOf("role" to "system", "content" to memory.asContext(relevantMemories)))
+        session.messages
+            .takeLast(MAX_MESSAGES)
+            .filter { it.role != ChatRole.SYSTEM }
+            .forEach { message ->
+                add(mapOf("role" to message.role.apiValue, "content" to redact(trim(message.content))))
+            }
+    }
+
+    /** Informs the model of the real outcome before asking for the final answer. */
+    private fun buildRoundTwoPayload(
+        base: List<Map<String, String>>,
+        block: com.chrispixel.chrisai.data.tools.ToolCallBlock,
+        report: ToolExecutionReport
+    ): List<Map<String, String>> = base + listOf(
+        mapOf("role" to "assistant", "content" to block.preamble.ifBlank { "Ejecuto la acción." }),
+        mapOf(
+            "role" to "user",
+            "content" to "He ejecutado las siguientes acciones (resultado real):\n" +
+                report.summaryForModel() +
+                "\n\nEscribe ahora el mensaje final para el usuario con el resultado. " +
+                "No repitas el bloque [TOOLS] ni la sintaxis de herramientas."
+        )
+    )
+
+    private fun sumNullable(a: Long?, b: Long?): Long? = when {
+        a == null && b == null -> null
+        else -> (a ?: 0L) + (b ?: 0L)
+    }
+
+    private fun sumNullable(a: Int?, b: Int?): Int? = when {
+        a == null && b == null -> null
+        else -> (a ?: 0) + (b ?: 0)
+    }
+
+    /** Forwards streamed text to the UI but suppresses everything at/after [TOOLS]. */
+    private class VisibleFilter(private val next: (String) -> Unit) {
+        private val buffer = StringBuilder()
+        private var cursor = 0
+        private var suppressed = false
+
+        fun accept(chunk: String) {
+            if (suppressed) return
+            buffer.append(chunk)
+            val marker = buffer.indexOf(TOOLS_MARKER, cursor)
+            if (marker >= 0) {
+                if (marker > cursor) next(buffer.substring(cursor, marker))
+                cursor = buffer.length
+                suppressed = true
+            } else {
+                next(buffer.substring(cursor))
+                cursor = buffer.length
+            }
+        }
+
+        private companion object {
+            const val TOOLS_MARKER = "[TOOLS]"
+        }
     }
 
     private suspend fun relevantMemories(userText: String?): List<Memory> {

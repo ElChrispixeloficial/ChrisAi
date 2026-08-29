@@ -51,6 +51,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import com.chrispixel.chrisai.BuildConfig
 import com.chrispixel.chrisai.data.personality.PersonalityConfig
 import com.chrispixel.chrisai.data.personality.PersonalityPreset
+import com.chrispixel.chrisai.data.speech.TtsVoiceInfo
 import com.chrispixel.chrisai.data.update.ReleaseInfo
 import com.chrispixel.chrisai.ui.ChrisViewModel
 import com.chrispixel.chrisai.ui.UpdateUiState
@@ -60,11 +61,11 @@ fun SettingsScreen(vm: ChrisViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scrollState = rememberScrollState()
 
-    val ttsVoices = remember { mutableStateListOf<String>() }
+    val ttsVoices = remember { mutableStateListOf<TtsVoiceInfo>() }
     LaunchedEffect(state.ttsEnabled) {
         if (state.ttsEnabled) {
             ttsVoices.clear()
-            ttsVoices.addAll(vm.ttsVoices())
+            ttsVoices.addAll(vm.ttsVoiceInfos())
         }
     }
 
@@ -104,11 +105,14 @@ fun SettingsScreen(vm: ChrisViewModel) {
         VoiceSection(
             ttsEnabled = state.ttsEnabled,
             ttsRate = state.ttsRate,
+            ttsPitch = state.ttsPitch,
             ttsVoice = state.ttsVoice,
             autoRead = state.autoRead,
             onTtsEnabled = { vm.setTtsEnabled(it) },
             onRate = { vm.setTtsRate(it) },
+            onPitch = { vm.setTtsPitch(it) },
             onVoice = { vm.setTtsVoice(it) },
+            onPreview = { vm.previewTts(it) },
             onAutoRead = { vm.setAutoRead(it) },
             ttsVoices = ttsVoices
         )
@@ -403,13 +407,16 @@ private fun PersonalitySection(
 private fun VoiceSection(
     ttsEnabled: Boolean,
     ttsRate: Float,
+    ttsPitch: Float,
     ttsVoice: String,
     autoRead: Boolean,
     onTtsEnabled: (Boolean) -> Unit,
     onRate: (Float) -> Unit,
+    onPitch: (Float) -> Unit,
     onVoice: (String) -> Unit,
+    onPreview: (String) -> Unit,
     onAutoRead: (Boolean) -> Unit,
-    ttsVoices: List<String>
+    ttsVoices: List<TtsVoiceInfo>
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("Leer respuestas en voz alta", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
@@ -431,21 +438,56 @@ private fun VoiceSection(
             steps = 14
         )
 
+        Spacer(Modifier.height(4.dp))
+        Text("Tono (pitch): %.2fx".format(ttsPitch), style = MaterialTheme.typography.bodyMedium)
+        Slider(
+            value = ttsPitch,
+            onValueChange = onPitch,
+            valueRange = 0.5f..2.0f,
+            steps = 14
+        )
+
+        Spacer(Modifier.height(8.dp))
+        Text("Probar voz", style = MaterialTheme.typography.bodyMedium)
+        OutlinedButton(onClick = { onPreview("Hola, soy ChrisAI. Esta es mi voz.") }) {
+            Text("▶ Reproducir ejemplo")
+        }
+
         if (ttsVoices.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            Text("Voz actual: ${ttsVoice.ifBlank { "predeterminada" }}", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Voz actual: ${ttsVoice.ifBlank { "predeterminada" }}",
+                style = MaterialTheme.typography.bodyMedium
+            )
             ttsVoices.take(8).forEach { voice ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onVoice(voice) }
+                        .clickable { onVoice(voice.name) }
                         .padding(vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    RadioButton(selected = voice == ttsVoice, onClick = { onVoice(voice) })
+                    RadioButton(selected = voice.name == ttsVoice, onClick = { onVoice(voice.name) })
                     Spacer(Modifier.width(4.dp))
-                    Text(voice, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                    Text(
+                        voice.displayName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        voice.localeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
+            }
+            if (ttsVoices.size > 8) {
+                Text(
+                    "…y ${ttsVoices.size - 8} voces más (elige por nombre con texto o voz del sistema).",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         } else {
             Spacer(Modifier.height(8.dp))

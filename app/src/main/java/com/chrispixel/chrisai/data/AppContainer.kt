@@ -9,6 +9,9 @@ import com.chrispixel.chrisai.data.local.db.AppDatabase
 import com.chrispixel.chrisai.data.remote.OpenRouterApi
 import com.chrispixel.chrisai.data.speech.SttController
 import com.chrispixel.chrisai.data.speech.TtsController
+import com.chrispixel.chrisai.data.tools.ToolRegistry
+import com.chrispixel.chrisai.data.tools.android.AndroidToolsProvider
+import com.chrispixel.chrisai.data.tools.android.ToolManager
 import com.chrispixel.chrisai.data.update.UpdaterRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,10 +40,16 @@ class AppContainer(application: Application) {
     val stt: SttController = SttController(application)
     val haptics: Haptics = Haptics(application, settings)
 
+    // v0.7 ChrisTools: structured, safe tool execution.
+    private val toolsProvider = AndroidToolsProvider(application)
+    val tools: ToolRegistry = toolsProvider.registry
+    val toolManager: ToolManager = ToolManager(tools)
+
     val chatRepository: ChatRepository = ChatRepository(
         api = api,
         chatStore = chatStore,
         settings = settings,
-        memory = memory
+        memory = memory,
+        tools = toolManager
     )
 }

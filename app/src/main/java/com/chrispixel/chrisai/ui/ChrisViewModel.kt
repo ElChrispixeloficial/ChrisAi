@@ -7,6 +7,8 @@ import com.chrispixel.chrisai.BuildConfig
 import com.chrispixel.chrisai.ChrisApplication
 import com.chrispixel.chrisai.data.emotion.Emotion
 import com.chrispixel.chrisai.data.emotion.EmotionClassifier
+import com.chrispixel.chrisai.data.emotion.EmotionEngine
+import com.chrispixel.chrisai.data.emotion.EmotionState
 import com.chrispixel.chrisai.data.local.MemoryIntent
 import com.chrispixel.chrisai.data.local.MemoryWriteResult
 import com.chrispixel.chrisai.data.model.AiModel
@@ -18,6 +20,8 @@ import com.chrispixel.chrisai.data.personality.PersonalityConfig
 import com.chrispixel.chrisai.data.remote.OpenRouterException
 import com.chrispixel.chrisai.data.speech.SttEvent
 import com.chrispixel.chrisai.data.speech.TtsStatus
+import com.chrispixel.chrisai.data.tools.ToolResultStatus
+import com.chrispixel.chrisai.data.tools.android.ToolEvent
 import com.chrispixel.chrisai.data.update.ReleaseInfo
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -55,11 +59,15 @@ data class ChatUiState(
     val personality: PersonalityConfig = PersonalityConfig(),
     val personalityFeedback: String? = null,
     val emotion: Emotion = Emotion.NEUTRAL,
+    // v0.7
+    val emotionState: EmotionState? = null,
+    val toolEvents: List<ToolEvent> = emptyList(),
     val hapticsEnabled: Boolean = true,
     val animationsEnabled: Boolean = true,
     val autoRead: Boolean = false,
     val ttsEnabled: Boolean = false,
     val ttsRate: Float = 1.0f,
+    val ttsPitch: Float = 1.0f,
     val ttsVoice: String = "",
     val sttLanguage: String = "",
     val ttsStatus: TtsStatus = TtsStatus.Unavailable,
@@ -105,6 +113,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 autoRead = container.settings.autoRead.value,
                 ttsEnabled = container.settings.ttsEnabled.value,
                 ttsRate = container.settings.ttsRate.value,
+                ttsPitch = container.settings.ttsPitch.value,
                 ttsVoice = container.settings.ttsVoice.value,
                 sttLanguage = container.settings.sttLanguage.value,
                 messagesSent = first?.messages?.count { it.role == ChatRole.USER } ?: 0
@@ -167,6 +176,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 messages = session.messages,
                 error = null,
                 emotion = Emotion.NEUTRAL,
+                emotionState = null,
                 messagesSent = session.messages.count { it.role == ChatRole.USER }
             )
         }
@@ -181,6 +191,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             messages = emptyList(),
             error = null,
             emotion = Emotion.NEUTRAL,
+            emotionState = null,
+            toolEvents = emptyList(),
             messagesSent = 0,
             listening = false,
             sttPartial = null
@@ -197,7 +209,9 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             currentSessionId = if (wasCurrent) null else current.currentSessionId,
             messages = if (wasCurrent) emptyList() else current.messages,
             messagesSent = if (wasCurrent) 0 else current.messagesSent,
-            emotion = if (wasCurrent) Emotion.NEUTRAL else current.emotion
+            emotion = if (wasCurrent) Emotion.NEUTRAL else current.emotion,
+            emotionState = if (wasCurrent) null else current.emotionState,
+            toolEvents = if (wasCurrent) emptyList() else current.toolEvents
         )
         viewModelScope.launch { container.chatStore.delete(id) }
     }
@@ -311,27 +325,48 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(ttsRate = bounded)
     }
 
+    fun setTtsPitch(pitch: Float) {
+        val bounded = pitch.coerceIn(0.5f, 2.0f)
+        viewModelScope.launch { container.settings.setTtsPitch(bounded) }
+        _state.value = _state.value.copy(ttsPitch = bounded)
+    }
+
     fun setTtsVoice(voiceName: String) {
         viewModelScope.launch { container.settings.setTtsVoice(voiceName) }
         _state.value = _state.value.copy(ttsVoice = voiceName)
         container.tts.setVoicePreference(voiceName)
     }
 
-    fun ttsVoices(): List<String> = container.tts.listVoices()
+    fun previewTts(text: String) {
+        val current = _state.value
+        if (!current.ttsEnabled) return
+        container.tts.preview(text, current.ttsRate, current.ttsPitch)
+    }
+
+    fun ttsVoices(): List<String> = container.tts.listVoices().map { it.name }
+    fun ttsVoiceInfos(): List<com.chrispixel.chrisai.data.speech.TtsVoiceInfo> =
+        container.tts.listVoices()
 
     fun speakMessage(messageId: String, text: String) {
         if (!_state.value.ttsEnabled) return
         val current = _state.value
+        val pitch = current.ttsPitch
         val status = current.ttsStatus
         when {
             status is TtsStatus.Speaking && status.messageId == messageId -> {
                 container.tts.pause()
             }
             status is TtsStatus.Paused && status.messageId == messageId -> {
-                container.tts.resume(current.ttsRate)
+                container.tts.resume(current.ttsRate, pitch)
             }
             else -> {
-                container.tts.speak(messageId, text, current.ttsRate)
+                container.tts.speakWithEmotion(
+                    messageId,
+                    text,
+                    current.ttsRate,
+                    pitch,
+                    current.emotion
+                )
             }
         }
     }
@@ -547,6 +582,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         val current = _state.value
         val model = current.selectedModel
         val now = System.currentTimeMillis()
+        val previousEmotion = current.emotionState
 
         val base: ChatSession = current.currentSessionId
             ?.let { id -> current.sessions.firstOrNull { it.id == id } }
@@ -563,15 +599,37 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
         streamingJob = viewModelScope.launch {
             val accumulated = StringBuilder()
-            _state.value = _state.value.copy(emotion = Emotion.GENERATING)
+            _state.value = _state.value.copy(
+                emotion = Emotion.GENERATING,
+                emotionState = EmotionEngine.generating(),
+                toolEvents = emptyList()
+            )
             val messageId = withUser.id
             try {
-                val reply = container.chatRepository.streamReply(withUser) { delta ->
-                    accumulated.append(delta)
-                    updateStreamingPlaceholder(withUser.id, accumulated.toString())
-                    // Subtle haptic pulse per streamed fragment (throttled internally).
-                    if (delta.isNotBlank()) container.haptics.pulse()
+                val reply = container.chatRepository.streamReply(
+                    withUser,
+                    onDelta = { delta ->
+                        accumulated.append(delta)
+                        updateStreamingPlaceholder(withUser.id, accumulated.toString())
+                        // Subtle haptic pulse per streamed fragment (throttled internally).
+                        if (delta.isNotBlank()) container.haptics.pulse()
+                    },
+                    emotionContext = emotionContext(previousEmotion)
+                )
+
+                // v0.7: discrete action indicators + barely-there haptics.
+                if (reply.toolEvents.isNotEmpty()) {
+                    _state.value = _state.value.copy(toolEvents = reply.toolEvents)
+                    if (reply.toolSucceeded) container.haptics.confirm()
+                    else if (reply.toolCallCount > 0) container.haptics.error()
                 }
+
+                val emotionState = EmotionEngine.finalState(
+                    userText = text,
+                    replyText = reply.text,
+                    toolSucceeded = reply.toolSucceeded.takeIf { reply.toolCallCount > 0 },
+                    previous = previousEmotion
+                )
                 finalizeAssistant(
                     sessionId = withUser.id,
                     content = reply.text,
@@ -580,30 +638,41 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                     latencyMs = reply.latencyMs,
                     totalMs = reply.totalMs,
                     promptTokens = reply.promptTokens,
-                    completionTokens = reply.completionTokens
+                    completionTokens = reply.completionTokens,
+                    emotionState = emotionState
                 )
-                maybeAutoRead(messageId, reply.text)
+                maybeAutoRead(messageId, reply.text, emotionState)
             } catch (e: CancellationException) {
                 finalizeAssistant(withUser.id, accumulated.toString(), failed = false, errorText = null)
-                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL)
+                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
                 throw e
             } catch (e: OpenRouterException) {
                 val msg = e.message ?: "Error desconocido"
                 finalizeAssistant(withUser.id, msg, failed = true, errorText = msg)
-                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL)
+                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
             } catch (e: Exception) {
                 val msg = "Error inesperado: ${e.message ?: "desconocido"}"
                 finalizeAssistant(withUser.id, msg, failed = true, errorText = msg)
-                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL)
+                _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
             }
         }
     }
 
-    private fun maybeAutoRead(messageId: String, text: String) {
+    /** Brief simulated-mood context for the model (only when intensity is noticeable). */
+    private fun emotionContext(state: EmotionState?): String? {
+        val s = state ?: return null
+        if (s.type == Emotion.NEUTRAL || s.intensity < EmotionEngine.INTENSITY_SUBTLE) return null
+        return "Estado emocional actual (simulado, computacional; no es una emoción humana real): " +
+            "${s.type.label} con intensidad ${s.intensity}. " +
+            "Refleja consecuencias suaves y apropiadas, sin exagerar."
+    }
+
+    private fun maybeAutoRead(messageId: String, text: String, emotionState: EmotionState?) {
         val current = _state.value
         if (!current.autoRead || !current.ttsEnabled) return
         if (text.isBlank() || current.ttsStatus is TtsStatus.Error) return
-        container.tts.speak(messageId, text, current.ttsRate)
+        val emotion = emotionState?.type ?: current.emotion
+        container.tts.speakWithEmotion(messageId, text, current.ttsRate, current.ttsPitch, emotion)
     }
 
     private fun appendLocalExchange(userText: String, assistantText: String) {
@@ -681,7 +750,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         latencyMs: Long? = null,
         totalMs: Long? = null,
         promptTokens: Int? = null,
-        completionTokens: Int? = null
+        completionTokens: Int? = null,
+        emotionState: EmotionState? = null
     ) {
         val current = _state.value
         val finalMessage = ChatMessage(
@@ -706,12 +776,14 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         }
         sessions.sortedByDescending { it.updatedAt }
         val updatedSession = sessions.first { it.id == sessionId }
+        val finalEmotionState = if (failed) null else emotionState
         _state.value = current.copy(
             sessions = sessions,
             messages = if (current.currentSessionId == sessionId) updatedSession.messages else current.messages,
             streaming = false,
             error = errorText,
-            emotion = if (failed) Emotion.NEUTRAL else EmotionClassifier.classify(content)
+            emotion = finalEmotionState?.type ?: if (failed) Emotion.NEUTRAL else EmotionClassifier.classify(content),
+            emotionState = finalEmotionState
         )
         container.chatStore.upsert(updatedSession)
     }

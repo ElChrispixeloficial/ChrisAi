@@ -65,6 +65,34 @@ class Haptics(
         }
     }
 
+    /**
+     * Discrete two-tap pattern for a failed tool action or error feedback.
+     * Short, never continuous, and always optional.
+     */
+    fun error() {
+        if (!hapticsEnabled) return
+        val now = System.currentTimeMillis()
+        if (now - lastPulseAt < ERROR_THROTTLE_MS) return
+        lastPulseAt = now
+        if (!systemHapticsOn()) return
+        val vibrator = ensureVibrator() ?: return
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                vibrator.vibrate(
+                    VibrationEffect.createWaveform(
+                        longArrayOf(0, ERROR_PULSE_MS, ERROR_GAP_MS, ERROR_PULSE_MS),
+                        -1
+                    )
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(longArrayOf(0, ERROR_PULSE_MS, ERROR_GAP_MS, ERROR_PULSE_MS), -1)
+            }
+        } catch (_: Throwable) {
+            // ignore
+        }
+    }
+
     private fun ensureVibrator(): Vibrator? {
         if (vibrator == null) {
             vibrator = try {
@@ -90,6 +118,9 @@ class Haptics(
     private companion object {
         const val THROTTLE_MS = 250L
         const val CONFIRM_THROTTLE_MS = 400L
+        const val ERROR_THROTTLE_MS = 500L
+        const val ERROR_PULSE_MS = 25L
+        const val ERROR_GAP_MS = 60L
         const val PULSE_MS = 18L
         const val CONFIRM_MS = 30L
         const val PULSE_AMPLITUDE = 40

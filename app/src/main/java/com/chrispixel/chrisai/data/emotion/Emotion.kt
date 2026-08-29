@@ -76,8 +76,11 @@ object EmotionClassifier {
     )
 
     /** Returns the dominant emotion, or NEUTRAL when no signal is found. */
-    fun classify(text: String): Emotion {
-        if (text.isBlank()) return Emotion.NEUTRAL
+    fun classify(text: String): Emotion = classifyWithScore(text).first
+
+    /** Returns the dominant emotion plus a raw signal score (0 = neutral). */
+    fun classifyWithScore(text: String): Pair<Emotion, Int> {
+        if (text.isBlank()) return Emotion.NEUTRAL to 0
         val lower = text.lowercase()
         // Only inspect the first part of long replies (signal is usually early).
         val sample = lower.take(1500)
@@ -93,6 +96,6 @@ object EmotionClassifier {
                 best = emotion
             }
         }
-        return if (bestScore > 0) best else Emotion.NEUTRAL
+        return best to bestScore
     }
 }

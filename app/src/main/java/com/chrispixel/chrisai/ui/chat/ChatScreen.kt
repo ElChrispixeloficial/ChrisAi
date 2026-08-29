@@ -78,6 +78,8 @@ import com.chrispixel.chrisai.data.emotion.Emotion
 import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.speech.TtsStatus
+import com.chrispixel.chrisai.data.tools.ToolResultStatus
+import com.chrispixel.chrisai.data.tools.android.ToolEvent
 import com.chrispixel.chrisai.nativebridge.NativeBridge
 import com.chrispixel.chrisai.ui.ChatUiState
 import com.chrispixel.chrisai.ui.ChrisViewModel
@@ -163,6 +165,9 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
             if (state.listeningError != null) {
                 ErrorBanner(message = state.listeningError!!, onDismiss = { vm.dismissListeningError() })
             }
+            if (state.toolEvents.isNotEmpty()) {
+                ToolIndicators(events = state.toolEvents)
+            }
             if (state.update.checking) {
                 UpdatingBanner()
             } else {
@@ -184,10 +189,11 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
                 Box(modifier = Modifier.weight(1f)) {
                     EmotionBackdrop(
                         emotion = state.emotion,
+                        intensity = state.emotionState?.intensity ?: 0f,
                         animationsEnabled = state.animationsEnabled,
                         modifier = Modifier
                             .fillMaxSize()
-                            .alpha(0.5f)
+                            .alpha(0.6f)
                     )
                     LazyColumn(
                         state = listState,
@@ -211,31 +217,45 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
     }
 }
 
-/** Single primary visual effect for the current emotion (v0.6). */
+/**
+ * v0.7 single primary visual effect per emotion.
+ *
+ * The tint scales with [intensity] (buckets 0..1) so it is clearly visible in
+ * a screenshot but stays calm. GENERATING gets priority: a violet gradient plus
+ * a slow breathing glow and a soft vignette, transitioning smoothly to the
+ * final emotion once the reply finishes.
+ */
 @Composable
-private fun EmotionBackdrop(emotion: Emotion, animationsEnabled: Boolean, modifier: Modifier = Modifier) {
-    val target = if (emotion == Emotion.GENERATING) {
-        Emotion.GENERATING.accent
-    } else {
-        emotion.accent
-    }
+private fun EmotionBackdrop(
+    emotion: Emotion,
+    intensity: Float,
+    animationsEnabled: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val accent = emotion.accent
     val animated by animateColorAsState(
-        targetValue = if (animationsEnabled) target else Color.Transparent,
-        animationSpec = tween(durationMillis = 1200),
+        targetValue = if (animationsEnabled) accent else Color.Transparent,
+        animationSpec = tween(durationMillis = 1400),
         label = "emotionBackdrop"
     )
-    val transition = rememberInfiniteTransition(label = "generating")
+    val transition = rememberInfiniteTransition(label = "emotionBreath")
     val breath by transition.animateFloat(
-        initialValue = 0.05f,
-        targetValue = 0.16f,
-        animationSpec = infiniteRepeatable(tween(1800), RepeatMode.Reverse),
+        initialValue = 0.08f,
+        targetValue = 0.2f,
+        animationSpec = infiniteRepeatable(tween(2000), RepeatMode.Reverse),
         label = "breath"
     )
-    val alpha = when {
-        !animationsEnabled -> 0f
-        emotion == Emotion.GENERATING -> breath
-        else -> 0.10f
+
+    val isGenerating = emotion == Emotion.GENERATING
+    val effectiveIntensity = intensity.coerceIn(0f, 1f)
+    // 0.2 → ~13% tint, 0.5 → ~19%, 1.0 → ~30%: visible but never a flash.
+    val baseAlpha = if (isGenerating) breath else 0.06f + effectiveIntensity * 0.24f
+    val alpha = if (!animationsEnabled || effectiveIntensity == 0f && !isGenerating) {
+        0f
+    } else {
+        baseAlpha
     }
+    if (alpha <= 0f) return
 
     Box(
         modifier = modifier.background(
@@ -243,7 +263,56 @@ private fun EmotionBackdrop(emotion: Emotion, animationsEnabled: Boolean, modifi
                 colors = listOf(animated.copy(alpha = alpha), Color.Transparent)
             )
         )
-    )
+    ) {
+        if (isGenerating) {
+            // Soft vignette: edges glow, center stays readable. Not a flash.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                animated.copy(alpha = breath * 0.5f)
+                            ),
+                            radius = 1100f
+                        )
+                    )
+            )
+        }
+    }
+}
+
+/** Discrete per-action indicators (⚙️ running, ✓ done, ⚠️ not found...). */
+@Composable
+private fun ToolIndicators(events: List<ToolEvent>) {
+    val finalEvents = events.filter { it.status != ToolResultStatus.RUNNING }
+    val lastMessage = finalEvents.lastOrNull()?.message
+    val succeeded = finalEvents.count { it.status == ToolResultStatus.SUCCESS }
+    if (lastMessage == null && succeeded == 0) return
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        lastMessage?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2
+            )
+        }
+        if (succeeded > 1) {
+            Text(
+                "⚙️ $succeeded acciones ejecutadas",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
