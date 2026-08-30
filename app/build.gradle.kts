@@ -32,15 +32,22 @@ android {
         applicationId = "com.chrispixel.chrisai"
         minSdk = 23
         targetSdk = 35
-versionCode = 9
+versionCode = 10
 
-        versionName = "0.8.1"
+        versionName = "0.9.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         val openrouterApiKey = readLocalProperty("OPENROUTER_API_KEY").orEmpty()
         buildConfigField("String", "OPENROUTER_API_KEY", "\"$openrouterApiKey\"")
         buildConfigField("String", "DEFAULT_MODEL", "\"openrouter/free\"")
         buildConfigField("String", "OPENROUTER_BASE_URL", "\"https://openrouter.ai/api/v1\"")
+
+        // v0.9 provider engine: Gemini is the fallback provider when OpenRouter
+        // fails recoverably or when the active model cannot see images. The key
+        // lives in local.properties (gitignored) like the OpenRouter one.
+        val geminiApiKey = readLocalProperty("GEMINI_API_KEY").orEmpty()
+        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+        buildConfigField("String", "GEMINI_MODEL", "\"gemini-2.0-flash\"")
 
         // Official update source: the ChrisAI GitHub repository (releases only).
         buildConfigField("String", "UPDATE_REPO_OWNER", "\"ElChrispixeloficial\"")

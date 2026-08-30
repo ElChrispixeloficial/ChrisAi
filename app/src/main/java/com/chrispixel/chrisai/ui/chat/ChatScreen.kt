@@ -72,6 +72,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.content.pm.PackageManager
 import android.Manifest
+import android.app.Activity
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -115,6 +117,13 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
         ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         uri?.let { vm.attachImage(it) }
+    }
+
+    // v0.9: screen sharing requires the system consent dialog.
+    val screenCaptureLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        vm.onScreenPermissionResult(result.resultCode, result.data)
     }
 
     // STT partial text flows into the composer while listening.
@@ -187,6 +196,26 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
                     onToggle = { vm.toggleCall() },
                     onInterrupt = { vm.interruptCall() }
                 )
+            }
+            if (state.callActive) {
+                VideoCallBar(
+                    cameraActive = state.cameraActive,
+                    screenSharing = state.screenSharing,
+                    hasVisionFrame = state.hasVisionFrame,
+                    lastVisionLabel = state.lastVisionLabel,
+                    onToggleCamera = { vm.toggleCamera() },
+                    onRequestScreen = {
+                        val projection = context.getSystemService(MediaProjectionManager::class.java)
+                        if (projection != null) {
+                            screenCaptureLauncher.launch(projection.createScreenCaptureIntent())
+                        } else Unit
+                    },
+                    onStopScreen = { vm.stopScreenSharing() },
+                    onExplainScreen = { vm.explainScreen() }
+                )
+            }
+            if (state.videoError != null) {
+                ErrorBanner(message = state.videoError!!, onDismiss = { vm.dismissVideoError() })
             }
             if (state.error != null) {
                 ErrorBanner(message = state.error!!, onDismiss = { vm.dismissError() })
@@ -828,4 +857,48 @@ private fun stageLabel(stage: LiveStage?): String = when (stage) {
     LiveStage.INTERRUPTED -> "✋ Interrumpido"
     LiveStage.ERROR -> "⚠️ Llamada detenida"
     null, LiveStage.IDLE -> "En llamada"
+}
+
+@Composable
+private fun VideoCallBar(
+    cameraActive: Boolean,
+    screenSharing: Boolean,
+    hasVisionFrame: Boolean,
+    lastVisionLabel: String?,
+    onToggleCamera: () -> Unit,
+    onRequestScreen: () -> Unit,
+    onStopScreen: () -> Unit,
+    onExplainScreen: () -> Unit
+) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (hasVisionFrame) lastVisionLabel ?: "📷 Capturando…" else "📹 Videollamada",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                if (hasVisionFrame) {
+                    TextButton(onClick = onExplainScreen) {
+                        Text("Qué ves")
+                    }
+                }
+                TextButton(onClick = onToggleCamera) {
+                    Text(if (cameraActive) "📷 Cámara: on" else "📷 Cámara")
+                }
+                if (screenSharing) {
+                    TextButton(onClick = onStopScreen) {
+                        Text("🖥️ Detener")
+                    }
+                } else {
+                    TextButton(onClick = onRequestScreen) {
+                        Text("🖥️ Pantalla")
+                    }
+                }
+            }
+        }
+    }
 }

@@ -1,13 +1,20 @@
 package com.chrispixel.chrisai.ui
 
 import android.app.Application
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.chrispixel.chrisai.BuildConfig
 import com.chrispixel.chrisai.ChrisApplication
+import com.chrispixel.chrisai.data.actions.ActionContextStore
+import com.chrispixel.chrisai.data.actions.ActionPlanner
+import com.chrispixel.chrisai.data.actions.FastAction
+import com.chrispixel.chrisai.data.actions.PlanResult
+import com.chrispixel.chrisai.data.actions.summaryLabel
 import com.chrispixel.chrisai.data.emotion.Emotion
 import com.chrispixel.chrisai.data.emotion.EmotionClassifier
 import com.chrispixel.chrisai.data.emotion.EmotionEngine
@@ -23,13 +30,20 @@ import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
 import com.chrispixel.chrisai.data.model.Memory
+import com.chrispixel.chrisai.data.permissions.CapabilityId
+import com.chrispixel.chrisai.data.permissions.CapabilityStatus
+import com.chrispixel.chrisai.data.permissions.PermissionCenter
 import com.chrispixel.chrisai.data.personality.PersonalityConfig
-import com.chrispixel.chrisai.data.remote.OpenRouterException
+import com.chrispixel.chrisai.data.provider.ProviderCallException
+import com.chrispixel.chrisai.data.provider.ProviderErrorType
 import com.chrispixel.chrisai.data.speech.SttEvent
 import com.chrispixel.chrisai.data.speech.TtsStatus
+import com.chrispixel.chrisai.data.tools.ToolCall
 import com.chrispixel.chrisai.data.tools.ToolResultStatus
 import com.chrispixel.chrisai.data.tools.android.ToolEvent
 import com.chrispixel.chrisai.data.update.ReleaseInfo
+import com.chrispixel.chrisai.data.vision.ScreenCaptureService
+import com.chrispixel.chrisai.data.vision.VisionFrameBus
 import com.chrispixel.chrisai.data.vision.VisionMessage
 import com.chrispixel.chrisai.data.vision.VisionSupport
 import java.io.File
@@ -101,7 +115,19 @@ data class ChatUiState(
     val imagesEnabled: Boolean = true,
     // v0.8.1: pending image attachment (absolute path to a local JPEG).
     val pendingImage: String? = null,
-    val imageError: String? = null
+    val imageError: String? = null,
+    // v0.9: videollamada (controlled visual capture), study mode, permissions.
+    val videoCallActive: Boolean = false,
+    val cameraActive: Boolean = false,
+    val screenSharing: Boolean = false,
+    val videoError: String? = null,
+    val studyModeEnabled: Boolean = false,
+    val captureIntervalSec: Int = 5,
+    val lastVisionLabel: String? = null,
+    val hasVisionFrame: Boolean = false,
+    val permissions: List<CapabilityStatus> = emptyList(),
+    val driveConnected: Boolean = false,
+    val providerFallbackAvailable: Boolean = false
 )
 
 class ChrisViewModel(app: Application) : AndroidViewModel(app) {
@@ -118,8 +144,15 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     private var callWaitJob: Job? = null
     private var callPendingText: String? = null
 
+    // v0.9: cross-action memory + vision capture bookkeeping.
+    private val actionContext = ActionContextStore()
+    private var latestVisionPath: String? = null
+
     init {
         loadInitial()
+        observeVisionSources()
+        observeVisionProblems()
+        refreshPermissions()
     }
 
     private fun loadInitial() {
@@ -148,8 +181,12 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 callGreetingEnabled = container.settings.callGreetingEnabled.value,
                 callContinuousEnabled = container.settings.callContinuousEnabled.value,
                 imagesEnabled = container.settings.imagesEnabled.value,
+                studyModeEnabled = container.settings.studyModeEnabled.value,
+                captureIntervalSec = container.settings.captureIntervalSec.value,
+                providerFallbackAvailable = container.providerEngine.fallbackVisionCapable,
                 messagesSent = first?.messages?.count { it.role == ChatRole.USER } ?: 0
             )
+            container.contextSource.studyActive = _state.value.studyModeEnabled
             observeTts()
             checkForUpdates(
                 quiet = true
@@ -166,6 +203,151 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
+    }
+
+    // ------------------------------------------------------ v0.9 vision sources
+
+    /** Mirrors real capture state from the camera session and projection service. */
+    private fun observeVisionSources() {
+        viewModelScope.launch {
+            VisionFrameBus.cameraActive.collect { active ->
+                _state.update {
+                    it.copy(
+                        cameraActive = active,
+                        videoCallActive = it.callActive && (active || it.screenSharing)
+                    )
+                }
+                refreshPermissions()
+            }
+        }
+        viewModelScope.launch {
+            VisionFrameBus.screenActive.collect { active ->
+                _state.update {
+                    it.copy(
+                        screenSharing = active,
+                        videoCallActive = it.callActive && (it.cameraActive || active)
+                    )
+                }
+                refreshPermissions()
+            }
+        }
+        viewModelScope.launch {
+            VisionFrameBus.frames.collect { frame ->
+                if (frame.path == latestVisionPath) return@collect
+                latestVisionPath = frame.path
+                val sourceLabel = if (frame.source == VisionFrameBus.SOURCE_CAMERA) "cámara" else "pantalla"
+                val stamp = java.text.SimpleDateFormat(
+                    "HH:mm", java.util.Locale.getDefault()
+                ).format(java.util.Date())
+                _state.update {
+                    it.copy(hasVisionFrame = true, lastVisionLabel = "Captura de $sourceLabel a las $stamp")
+                }
+                container.contextSource.visionAnalysis = _state.value.lastVisionLabel
+            }
+        }
+    }
+
+    private fun observeVisionProblems() {
+        viewModelScope.launch {
+            VisionFrameBus.problems.collect { problem ->
+                _state.value = _state.value.copy(videoError = problem.message)
+                // Not a capture source (service shut down) → sync flags below.
+                refreshPermissions()
+            }
+        }
+    }
+
+    /** Recomputes the Permission Center snapshot from the live platform state. */
+    private fun refreshPermissions() {
+        val app = getApplication<Application>()
+        val current = _state.value
+        val snapshot = PermissionCenter.snapshot(
+            micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                app, android.Manifest.permission.RECORD_AUDIO
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
+            cameraGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                app, android.Manifest.permission.CAMERA
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
+            screenShareActive = current.screenSharing,
+            notificationsEnabled = com.chrispixel.chrisai.data.tools.android.ToolNotifier.canNotify(app),
+            toolsEnabled = true,
+            driveConnected = current.driveConnected,
+            visionAvailable = VisionMessage.support(current.selectedModel) != VisionSupport.NOT_SUPPORTED ||
+                container.providerEngine.fallbackVisionCapable,
+            fallbackProvider = container.providerEngine.fallbackVisionCapable
+        )
+        _state.update { it.copy(permissions = snapshot) }
+    }
+
+    // -------------------------------------------------- v0.9 videollamada
+
+    fun toggleCamera() {
+        if (_state.value.cameraActive) stopCamera() else startCamera()
+    }
+
+    fun startCamera() {
+        if (_state.value.cameraActive) return
+        val app = getApplication<Application>()
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            app, android.Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            _state.value = _state.value.copy(videoError = "Necesita dar permiso de cámara para la videollamada.")
+            return
+        }
+        val interval = _state.value.captureIntervalSec
+        val dir = File(app.filesDir, ATTACH_DIR)
+        container.camera.start(
+            intervalSec = interval,
+            dir = dir,
+            onFrame = { file -> VisionFrameBus.publish(VisionFrameBus.SOURCE_CAMERA, file.absolutePath) },
+            onProblem = { message ->
+                _state.update { it.copy(videoError = message) }
+                refreshPermissions()
+            }
+        )
+        container.haptics.confirm()
+    }
+
+    fun stopCamera() {
+        container.camera.stop()
+        container.haptics.confirm()
+    }
+
+    /** Called by the UI after the system screen-projection dialog. */
+    fun onScreenPermissionResult(resultCode: Int, data: Intent?) {
+        if (resultCode != android.app.Activity.RESULT_OK || data == null) {
+            _state.value = _state.value.copy(videoError = "Rechazaste compartir la pantalla.")
+            return
+        }
+        ScreenCaptureService.start(getApplication(), resultCode, data)
+        container.haptics.confirm()
+    }
+
+    fun stopScreenSharing() {
+        ScreenCaptureService.stop(getApplication())
+        container.haptics.confirm()
+    }
+
+    fun changeCaptureInterval(seconds: Int) {
+        val bounded = seconds.coerceIn(2, 60)
+        _state.value = _state.value.copy(captureIntervalSec = bounded)
+        viewModelScope.launch { container.settings.setCaptureIntervalSec(bounded) }
+        // Live-apply to an active camera session.
+        if (_state.value.cameraActive) {
+            container.camera.stop()
+            startCamera()
+        }
+    }
+
+    fun setStudyModeEnabled(enabled: Boolean) {
+        container.contextSource.studyActive = enabled
+        viewModelScope.launch { container.settings.setStudyModeEnabled(enabled) }
+        _state.value = _state.value.copy(studyModeEnabled = enabled)
+    }
+
+    fun dismissVideoError() {
+        _state.value = _state.value.copy(videoError = null)
     }
 
     // ------------------------------------------------------------------ chat
@@ -185,6 +367,17 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
+        // v0.9 fast actions: deterministic commands (open app, alarms, colgar,
+        // contexto entre acciones) run locally before hitting the model.
+        when (val plan = ActionPlanner.plan(trimmed)) {
+            is PlanResult.Plan -> {
+                container.haptics.confirm()
+                handleFastPlan(plan, trimmed)
+                return
+            }
+            else -> Unit
+        }
+
         container.haptics.confirm()
 
         viewModelScope.launch {
@@ -194,7 +387,14 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.callActive) speakReplyAndLoop(localReply)
                 return@launch
             }
-            startStreaming(trimmed)
+            // During an active video call, attach the latest bounded capture.
+            val currentState = _state.value
+            val frame = if (currentState.videoCallActive && latestVisionPath != null) latestVisionPath else null
+            startStreaming(
+                trimmed,
+                visionImagePath = frame,
+                needsVision = frame != null
+            )
         }
     }
 
@@ -289,7 +489,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     fun stopStreaming() {
         if (!_state.value.streaming) return
         streamingJob?.cancel()
-        viewModelScope.launch { container.api.cancelActiveCall() }
+        viewModelScope.launch { container.providerEngine.cancelActiveCall() }
     }
 
     fun openSession(id: String) {
@@ -362,8 +562,6 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 val models = ensureDefaultModel(container.chatRepository.fetchModels())
                 container.settings.saveCachedModels(models)
                 _state.value = _state.value.copy(availableModels = models, modelsLoading = false, error = null)
-            } catch (e: OpenRouterException) {
-                _state.value = _state.value.copy(modelsLoading = false, error = "No se pudieron cargar los modelos: ${e.message}")
             } catch (e: Exception) {
                 _state.value = _state.value.copy(modelsLoading = false, error = "No se pudieron cargar los modelos")
             }
@@ -626,8 +824,11 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         callPendingText = null
         if (_state.value.streaming) {
             streamingJob?.cancel()
-            viewModelScope.launch { container.api.cancelActiveCall() }
+            viewModelScope.launch { container.providerEngine.cancelActiveCall() }
         }
+        // v0.9: stop any active visual capture with the call.
+        if (_state.value.cameraActive) container.camera.stop()
+        if (_state.value.screenSharing) ScreenCaptureService.stop(getApplication())
         container.tts.stop()
         container.stt.cancel()
         live.on(LiveEvent.End)
@@ -636,7 +837,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             liveStage = null,
             listening = false,
             sttPartial = null,
-            listeningError = null
+            listeningError = null,
+            videoCallActive = false
         )
     }
 
@@ -796,6 +998,127 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         live.on(LiveEvent.ListenAgain)
         syncLiveStage()
         if (live.state.stage == LiveStage.LISTENING) armCallListening()
+    }
+
+    // ------------------------------------------------- v0.9 fast actions
+
+    /** Executes a locally-resolvable plan (ordered steps, no model round-trip). */
+    private fun handleFastPlan(plan: PlanResult.Plan, original: String) {
+        // "Explica esta pantalla": needs the vision model, handled separately.
+        if (plan.steps.any { it is FastAction.ExplainScreen }) {
+            handleExplainScreen()
+            return
+        }
+        viewModelScope.launch {
+            val events = mutableListOf<ToolEvent>()
+            val lines = mutableListOf<String>()
+            var endedCall = false
+            for (action in plan.steps) {
+                when (action) {
+                    is FastAction.EndCall -> {
+                        endedCall = true
+                        if (_state.value.callActive) endCall()
+                    }
+                    else -> runFastAction(action, events)?.let { lines += it }
+                }
+            }
+            actionContext.push(
+                plan.steps.mapIndexed { index, a -> ActionContextStore.Step(index + 1, a.summaryLabel()) }
+            )
+            if (events.isNotEmpty()) _state.update { it.copy(toolEvents = events) }
+            if (lines.isEmpty()) {
+                if (endedCall && !_state.value.callActive) {
+                    val done = "Llamada finalizada."
+                    appendLocalExchange(original, done)
+                    if (_state.value.callActive) speakReplyAndLoop(done)
+                }
+                return@launch
+            }
+            val body = lines.joinToString("\n")
+            val reply = if (plan.expectsSummary) "He hecho esto por ti:\n\n$body" else body
+            appendLocalExchange(original, reply)
+            if (events.isNotEmpty() && events.any { it.status == ToolResultStatus.SUCCESS }) {
+                container.haptics.confirm()
+            }
+            if (_state.value.callActive) speakReplyAndLoop(reply)
+        }
+    }
+
+    /** Runs one deterministic action, emitting a discrete [ToolEvent]. */
+    private suspend fun runFastAction(action: FastAction, events: MutableList<ToolEvent>): String? = when (action) {
+        is FastAction.OpenApp -> runTool("open_app", mapOf("appName" to action.query), events)
+        is FastAction.SearchInApp -> {
+            val target = action.appLabel ?: action.searchQuery
+            val opened = runTool("open_app", mapOf("appName" to target), events)
+            when {
+                opened == null -> "No pude abrir ${action.appLabel ?: action.searchQuery}."
+                opened.startsWith("✓") ->
+                    "$opened Para buscar «${action.searchQuery}», usa la barra de búsqueda de ${action.appLabel ?: action.searchQuery}."
+                else -> opened
+            }
+        }
+        is FastAction.OpenSettings -> openSystemSettings(events)
+        is FastAction.SetAlarm -> runTool(
+            "create_alarm",
+            mapOf("hours" to action.hour.toString(), "minutes" to action.minute.toString()),
+            events
+        )
+        is FastAction.SetTimer -> runTool("create_timer", mapOf("durationSeconds" to (action.minutes * 60).toString()), events)
+        is FastAction.WhatTime -> runTool("get_time", emptyMap(), events)
+        is FastAction.Battery -> runTool("get_battery_status", emptyMap(), events)
+        is FastAction.DeviceInfo -> runTool("get_device_info", emptyMap(), events)
+        is FastAction.AskContext -> actionContext.resolve(action.reference)
+            ?.let { "Ese paso era: ${it.label}${if (it.detail.isNotBlank()) " — ${it.detail}" else ""}" }
+            ?: "No tengo registrado ese paso."
+        else -> null
+    }
+
+    private suspend fun runTool(id: String, args: Map<String, String>, events: MutableList<ToolEvent>): String? {
+        val results = container.tools.execute(ToolCall(id = id, arguments = args))
+        events += ToolEvent(id, results.status, results.message)
+        if (results.status == ToolResultStatus.SUCCESS) container.haptics.pulse()
+        return results.message
+    }
+
+    /** Honest, key-safe message for provider failures (never logs secrets). */
+    private fun friendlyProviderError(e: ProviderCallException): String = when {
+        e.status == 401 -> "El proveedor rechazó la API key (401). Revísala en Ajustes."
+        e.status == 403 -> "El proveedor denegó el acceso (403). Revisa credenciales y permisos."
+        e.kind == ProviderErrorType.RETRYABLE -> e.message ?: "El proveedor está saturado o tardó demasiado."
+        else -> e.message ?: "Error con el proveedor de IA."
+    }
+
+    private fun openSystemSettings(events: MutableList<ToolEvent>): String? {
+        return try {
+            val intent = Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            getApplication<Application>().startActivity(intent)
+            events += ToolEvent("open_settings", ToolResultStatus.SUCCESS, "✓ Abriendo ajustes del sistema.")
+            "✓ Abriendo ajustes del sistema."
+        } catch (_: Exception) {
+            "No pude abrir los ajustes del sistema."
+        }
+    }
+
+    /** "Explica esta pantalla / dime qué ves": asks the model with the latest frame. */
+    fun explainScreen() {
+        handleExplainScreen()
+    }
+
+    private fun handleExplainScreen() {
+        val frame = latestVisionPath
+        if (frame == null) {
+            val reply = "Activa la videollamada (cámara o pantalla) para que pueda ver lo que tienes delante."
+            viewModelScope.launch {
+                appendLocalExchange("Explica esta pantalla.", reply)
+                if (_state.value.callActive) speakReplyAndLoop(reply)
+            }
+            return
+        }
+        startStreaming(
+            "Describe lo que se ve en la captura de pantalla/cámara y responde a lo que te he pedido.",
+            visionImagePath = frame,
+            needsVision = true
+        )
     }
 
     // ------------------------------------------------------------ v0.6 history
@@ -963,7 +1286,12 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun startStreaming(text: String, imagePath: String? = null) {
+    private fun startStreaming(
+        text: String,
+        imagePath: String? = null,
+        visionImagePath: String? = null,
+        needsVision: Boolean = imagePath != null
+    ) {
         val current = _state.value
         val model = current.selectedModel
         val now = System.currentTimeMillis()
@@ -1001,7 +1329,9 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                         // Subtle haptic pulse per streamed fragment (throttled internally).
                         if (delta.isNotBlank()) container.haptics.pulse()
                     },
-                    emotionContext = emotionContext(previousEmotion)
+                    emotionContext = emotionContext(previousEmotion),
+                    visionImagePath = visionImagePath ?: imagePath,
+                    needsVision = needsVision
                 )
 
                 // v0.7: discrete action indicators + barely-there haptics.
@@ -1037,8 +1367,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 finalizeAssistant(withUser.id, accumulated.toString(), failed = false, errorText = null)
                 _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
                 throw e
-            } catch (e: OpenRouterException) {
-                val msg = e.message ?: "Error desconocido"
+            } catch (e: ProviderCallException) {
+                val msg = friendlyProviderError(e)
                 finalizeAssistant(withUser.id, msg, failed = true, errorText = msg)
                 _state.value = _state.value.copy(emotion = Emotion.NEUTRAL, emotionState = null)
                 if (_state.value.callActive) handleCallReply(messageId, msg, null)

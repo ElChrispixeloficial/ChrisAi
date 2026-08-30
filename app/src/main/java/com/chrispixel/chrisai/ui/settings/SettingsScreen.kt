@@ -51,6 +51,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import com.chrispixel.chrisai.BuildConfig
 import com.chrispixel.chrisai.data.personality.PersonalityConfig
 import com.chrispixel.chrisai.data.personality.PersonalityPreset
+import com.chrispixel.chrisai.data.permissions.CapabilityStatus
+import com.chrispixel.chrisai.data.permissions.PermissionCenter
 import com.chrispixel.chrisai.data.speech.TtsVoiceInfo
 import com.chrispixel.chrisai.data.update.ReleaseInfo
 import com.chrispixel.chrisai.ui.ChrisViewModel
@@ -135,6 +137,17 @@ fun SettingsScreen(vm: ChrisViewModel) {
             onCallGreeting = { vm.setCallGreetingEnabled(it) },
             onCallContinuous = { vm.setCallContinuousEnabled(it) },
             onImages = { vm.setImagesEnabled(it) }
+        )
+
+        SectionHeader("Permisos y capacidades")
+        PermissionSection(permissions = state.permissions)
+
+        SectionHeader("Videollamada y estudio")
+        VideoStudySection(
+            studyEnabled = state.studyModeEnabled,
+            captureInterval = state.captureIntervalSec,
+            onStudy = { vm.setStudyModeEnabled(it) },
+            onCaptureInterval = { vm.changeCaptureInterval(it) }
         )
 
         SectionHeader("Memoria persistente")
@@ -783,6 +796,88 @@ private fun UpdateSection(
     Text(
         "Solo se usan releases oficiales del repositorio de ChrisAI. " +
             "La descarga e instalación siempre requieren tu confirmación.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+@Composable
+private fun PermissionSection(permissions: List<CapabilityStatus>) {
+    if (permissions.isEmpty()) {
+        Text(
+            "Cargando estado de capacidades…",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        return
+    }
+    val grouped = permissions.groupBy { PermissionCenter.group(it.id) }
+    grouped.entries.forEach { (groupName, items) ->
+        Text(
+            groupName,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary
+        )
+        items.forEach { item ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    item.id.label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    item.detail,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (item.enabled) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun VideoStudySection(
+    studyEnabled: Boolean,
+    captureInterval: Int,
+    onStudy: (Boolean) -> Unit,
+    onCaptureInterval: (Int) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Modo estudio", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Switch(checked = studyEnabled, onCheckedChange = onStudy)
+    }
+    Text(
+        "Inyecta tu conocimiento guardado en las respuestas del asistente.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+
+    Spacer(Modifier.height(12.dp))
+    Text("Frecuencia de captura visual", style = MaterialTheme.typography.bodyLarge)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Slider(
+            value = captureInterval.toFloat(),
+            onValueChange = { onCaptureInterval(it.toInt()) },
+            valueRange = 2f..60f,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            "$captureInterval s",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    Text(
+        "Cada cuántos segundos se toma una foto de la cámara o captura de pantalla " +
+            "durante la videollamada.",
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )

@@ -1,5 +1,6 @@
 package com.chrispixel.chrisai.data
 
+import com.chrispixel.chrisai.data.context.ContextEngine
 import com.chrispixel.chrisai.data.local.ChatStore
 import com.chrispixel.chrisai.data.local.MemoryIntent
 import com.chrispixel.chrisai.data.local.MemoryStore
@@ -8,6 +9,7 @@ import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
 import com.chrispixel.chrisai.data.model.Memory
 import com.chrispixel.chrisai.data.personality.PersonalityPrompt
+import com.chrispixel.chrisai.data.provider.ProviderEngine
 import com.chrispixel.chrisai.data.remote.OpenRouterApi
 import com.chrispixel.chrisai.data.tools.ToolCallParser
 import com.chrispixel.chrisai.data.tools.ToolExecutionReport
@@ -28,44 +30,74 @@ data class StreamReply(
 )
 
 /**
- * Orchestrates requests to OpenRouter: builds the payload with clearly separated
- * blocks (security -> tools -> personality -> emotion context -> memory context ->
- * trimmed history) and streams the assistant reply, measuring latency and tokens.
+ * Orchestrates requests through the v0.9 [ProviderEngine] (OpenRouter primary,
+ * Gemini as fallback for recoverable errors or vision-capability gaps). It
+ * builds the payload with clearly separated blocks (security -> tools ->
+ * personality -> emotion -> context engine -> trimmed history) and streams the
+ * assistant reply, measuring latency and tokens.
  *
- * v0.7: when the model emits a [TOOLS] envelope at the end of its text, the block
- * is parsed, validated and executed through [ToolManager] (never fallible,
- * arbitrary code), the visible preamble is preserved, and a second model pass
- * produces the final answer informed by the real execution report.
+ * v0.7: when the model emits a [TOOLS] envelope at the end of its text, the
+ * block is parsed, validated and executed through [ToolManager], the visible
+ * preamble is preserved, and a second model pass produces the final answer
+ * informed by the real execution report.
  */
 class ChatRepository(
     private val api: OpenRouterApi,
+    private val engine: ProviderEngine,
     private val chatStore: ChatStore,
     private val settings: SettingsRepository,
     private val memory: MemoryStore,
-    private val tools: ToolManager
+    private val tools: ToolManager,
+    // v0.9 context sources (video call / study), defaulted for tests.
+    private val visionAnalysis: () -> String? = { null },
+    private val foregroundApp: () -> String? = { null },
+    private val studyActive: () -> Boolean = { false }
 ) {
 
     private val apiKey get() = settings.apiKey.value
 
-    /** Streams a reply for [session]. Returns the cleaned text plus metrics. */
+    /**
+     * Streams a reply for [session]. Set [visionImagePath] (e.g. the latest
+     * camera/screen capture) and [needsVision] when the turn must include an
+     * image; the engine will pick a vision-capable provider if needed.
+     */
     suspend fun streamReply(
         session: ChatSession,
         onDelta: (String) -> Unit,
-        emotionContext: String? = null
+        emotionContext: String? = null,
+        visionImagePath: String? = null,
+        needsVision: Boolean = false
     ): StreamReply {
         val latestUser = session.messages.lastOrNull { it.role == ChatRole.USER }?.content
         val relevantMemories = relevantMemories(latestUser)
+        val context = ContextEngine.assemble(
+            ContextEngine.Input(
+                currentUserText = latestUser.orEmpty(),
+                currentSessionMessages = session.messages,
+                relevantMemories = relevantMemories,
+                foregroundAppLabel = foregroundApp(),
+                lastVisionAnalysis = visionAnalysis(),
+                studyActive = studyActive()
+            )
+        )
 
-        val basePayload = buildPayload(session, latestUser, relevantMemories, emotionContext)
+        val basePayload = buildPayload(
+            session = session,
+            latestUser = latestUser,
+            relevantMemories = relevantMemories,
+            emotionContext = emotionContext,
+            context = context,
+            visionImagePath = visionImagePath
+        )
 
         // Round 1: stream through a filter that hides any [TOOLS] envelope live.
         val roundOne = VisibleFilter(onDelta)
-        val first = api.streamChat(
+        val first = engine.streamChat(
             messages = basePayload,
             model = session.model.ifBlank { settings.model.value },
-            apiKey = apiKey,
             temperature = settings.temperature.value,
-            onDelta = roundOne::accept
+            onDelta = roundOne::accept,
+            needsVision = needsVision
         )
 
         val block = ToolCallParser.parse(first.text)
@@ -86,10 +118,9 @@ class ChatRepository(
             val report = tools.execute(block) { toolEvents += it }
             if (report != null) {
                 val roundTwoPayload = buildRoundTwoPayload(basePayload, block, report)
-                val roundTwo = api.streamChat(
+                val roundTwo = engine.streamChat(
                     messages = roundTwoPayload,
                     model = session.model.ifBlank { settings.model.value },
-                    apiKey = apiKey,
                     temperature = settings.temperature.value,
                     onDelta = onDelta
                 )
@@ -118,12 +149,14 @@ class ChatRepository(
         )
     }
 
-    /** System/Safety -> tools schemas -> personality -> emotion -> memory -> history. */
+    /** System/Safety -> tools schemas -> personality -> emotion -> context -> history. */
     private fun buildPayload(
         session: ChatSession,
         latestUser: String?,
         relevantMemories: List<Memory>,
-        emotionContext: String?
+        emotionContext: String?,
+        context: ContextEngine.Bundle,
+        visionImagePath: String?
     ): List<Map<String, Any>> = buildList {
         add(mapOf("role" to "system", "content" to Prompts.SYSTEM_PROMPT))
         add(mapOf("role" to "system", "content" to tools.schemas()))
@@ -131,7 +164,10 @@ class ChatRepository(
         emotionContext?.takeIf { it.isNotBlank() }?.let {
             add(mapOf("role" to "system", "content" to it))
         }
-        add(mapOf("role" to "system", "content" to memory.asContext(relevantMemories)))
+        // v0.9 bounded context blocks (memory, app, vision, study).
+        ContextEngine.toSystemBlocks(context).forEach { (_, block) ->
+            add(mapOf("role" to "system", "content" to block))
+        }
         val trimmed = session.messages
             .takeLast(MAX_MESSAGES)
             .filter { it.role != ChatRole.SYSTEM }
@@ -139,11 +175,13 @@ class ChatRepository(
         trimmed.forEachIndexed { index, message ->
             val content: Any = if (
                 message.role == ChatRole.USER &&
-                message.imagePath != null &&
+                (visionImagePath != null || message.imagePath != null) &&
                 index == lastUserIndex
             ) {
-                visionContent(message)
-                    ?: redact(trim(message.content))
+                visionContent(
+                    visionImagePath ?: message.imagePath!!,
+                    message.content
+                ) ?: redact(trim(message.content))
             } else {
                 redact(trim(message.content))
             }
@@ -156,15 +194,14 @@ class ChatRepository(
      * message. Returns null when the file is missing, too large, or unreadable
      * so the caller falls back to a plain-text caption.
      */
-    private fun visionContent(message: com.chrispixel.chrisai.data.model.ChatMessage): Any? {
-        val path = message.imagePath ?: return null
+    private fun visionContent(path: String, caption: String): Any? {
         val file = java.io.File(path)
         if (!file.exists() || !file.isFile) return null
         if (!com.chrispixel.chrisai.data.vision.VisionMessage.isReasonableImageSize(file.length().toInt())) return null
         return try {
             val bytes = file.readBytes()
             val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-            val prompt = message.content.ifBlank { "Analiza esta imagen y descríbela." }
+            val prompt = caption.ifBlank { "Analiza esta imagen y descríbela." }
             com.chrispixel.chrisai.data.vision.VisionMessage.userContentArray(
                 base64Image = base64,
                 mimeType = mimeTypeOf(path),

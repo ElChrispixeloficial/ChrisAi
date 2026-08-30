@@ -127,6 +127,16 @@ class SettingsRepository(
         .map { prefs -> prefs[KEY_IMAGES_ENABLED] ?: true }
         .stateIn(scope, SharingStarted.Eagerly, true)
 
+    /** v0.9: knowledge/study mode (pedagogical contract for the model). */
+    val studyModeEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_STUDY_MODE] ?: false }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /** v0.9: periodic visual capture interval (seconds, bounded 2..60). */
+    val captureIntervalSec: StateFlow<Int> = context.settingsDataStore.data
+        .map { prefs -> (prefs[KEY_CAPTURE_INTERVAL] ?: 5).coerceIn(2, 60) }
+        .stateIn(scope, SharingStarted.Eagerly, 5)
+
     init {
         scope.launch { migrateLegacyPreferences() }
     }
@@ -218,6 +228,16 @@ class SettingsRepository(
 
     suspend fun setImagesEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { it[KEY_IMAGES_ENABLED] = enabled }
+    }
+
+    // ------------------------------------------------------------- v0.9 flags
+
+    suspend fun setStudyModeEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_STUDY_MODE] = enabled }
+    }
+
+    suspend fun setCaptureIntervalSec(seconds: Int) {
+        context.settingsDataStore.edit { it[KEY_CAPTURE_INTERVAL] = seconds.coerceIn(2, 60) }
     }
 
     /** One-time import of the old SharedPreferences-based settings (v"1.0"). */
@@ -323,6 +343,8 @@ class SettingsRepository(
         val KEY_CALL_GREETING_ENABLED = booleanPreferencesKey("call_greeting_enabled")
         val KEY_CALL_CONTINUOUS_ENABLED = booleanPreferencesKey("call_continuous_enabled")
         val KEY_IMAGES_ENABLED = booleanPreferencesKey("images_enabled")
+        val KEY_STUDY_MODE = booleanPreferencesKey("study_mode")
+        val KEY_CAPTURE_INTERVAL = intPreferencesKey("capture_interval")
         const val DEFAULT_TEMPERATURE = 0.7
         const val PLAIN_PREFIX = "plain:"
     }
