@@ -18,6 +18,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
+    <!-- v1.0 onboarding: selección de cuenta Google para sincronización Drive
+         (AccountManager, sin play-services). Permiso runtime, se pide al tocar
+         "Continuar con Google" y solo para elegir/autenticar la cuenta. -->
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+
     <application
         android:name=".ChrisApplication"
         android:allowBackup="true"

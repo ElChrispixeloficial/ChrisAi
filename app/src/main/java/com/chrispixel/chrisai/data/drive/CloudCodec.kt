@@ -2,6 +2,7 @@ package com.chrispixel.chrisai.data.drive
 
 import org.json.JSONArray
 import org.json.JSONObject
+import com.chrispixel.chrisai.data.model.SessionKind
 
 /**
  * JSON (de)serialization for the cloud snapshot (v0.8).
@@ -22,6 +23,17 @@ object CloudCodec {
     const val MEMORY_FILE = "Memory.json"
     const val MEMORY_TXT = "Memory.txt"
     const val CONVERSATIONS_DIR = "Conversations"
+    const val SETTINGS_DIR = "Settings"
+    const val DATA_DIR = "Data"
+    const val SETTINGS_FILE = "Settings.json"
+    const val MEMORY_DIR = "Memory"
+
+    // v1.0 logical paths under the ChrisAI root tree.
+    fun memoryPath(): String = "$MEMORY_DIR/$MEMORY_FILE"
+    fun memoryTxtPath(): String = "$MEMORY_DIR/$MEMORY_TXT"
+    fun conversationPath(id: String): String = "$CONVERSATIONS_DIR/${conversationFileName(id)}"
+    fun settingsPath(): String = "$SETTINGS_DIR/$SETTINGS_FILE"
+    fun dataPath(deviceId: String): String = "$DATA_DIR/$deviceId.json"
 
     fun conversationFileName(id: String): String = "conversation_${sanitize(id)}.json"
 
@@ -104,6 +116,7 @@ object CloudCodec {
             .put("title", conv.title)
             .put("createdAt", conv.createdAtMillis)
             .put("updatedAt", conv.updatedAtMillis)
+            .put("kind", conv.kind)
             .put("messages", messages)
             .toString(2)
     }
@@ -116,6 +129,7 @@ object CloudCodec {
             title = doc.optString("title"),
             createdAtMillis = doc.optLong("createdAt", 0L),
             updatedAtMillis = doc.optLong("updatedAt", 0L),
+            kind = doc.optString("kind", SessionKind.DEFAULT.id),
             messages = if (arr == null) emptyList() else (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 CloudMessage(
@@ -135,4 +149,122 @@ object CloudCodec {
         (local + remote).forEach { item -> byId[item.id] = item }
         return byId.values.sortedByDescending { it.updatedAtMillis }
     }
+
+    // ---------------------------------------------------------- v1.0 settings
+
+    /** Non-secret settings snapshot for Settings.json (never contains keys). */
+    fun encodeSettings(settings: SettingsCloud): String = JSONObject()
+        .put("version", LAYOUT_VERSION)
+        .put("personalityName", settings.personalityName)
+        .put("presetId", settings.presetId)
+        .put("humorLevel", settings.humorLevel)
+        .put("detailLevel", settings.detailLevel)
+        .put("communicationStyle", settings.communicationStyle)
+        .put("customInstructions", settings.customInstructions)
+        .put("model", settings.model)
+        .put("temperature", settings.temperature)
+        .put("ttsEnabled", settings.ttsEnabled)
+        .put("autoRead", settings.autoRead)
+        .put("ttsRate", settings.ttsRate.toDouble())
+        .put("ttsPitch", settings.ttsPitch.toDouble())
+        .put("ttsVoice", settings.ttsVoice)
+        .put("sttLanguage", settings.sttLanguage)
+        .put("hapticsEnabled", settings.hapticsEnabled)
+        .put("animationsEnabled", settings.animationsEnabled)
+        .put("callModeEnabled", settings.callModeEnabled)
+        .put("greetingEnabled", settings.greetingEnabled)
+        .put("continuousEnabled", settings.continuousEnabled)
+        .put("imagesEnabled", settings.imagesEnabled)
+        .put("studyModeEnabled", settings.studyModeEnabled)
+        .put("captureIntervalSec", settings.captureIntervalSec)
+        .put("defaultSessionKind", settings.defaultSessionKind)
+        .put("updatedAt", settings.updatedAtMillis)
+        .toString(2)
+
+    fun decodeSettings(json: String): SettingsCloud = try {
+        val doc = JSONObject(json)
+        SettingsCloud(
+            personalityName = doc.optString("personalityName"),
+            presetId = doc.optString("presetId"),
+            humorLevel = doc.optInt("humorLevel", 2),
+            detailLevel = doc.optInt("detailLevel", 2),
+            communicationStyle = doc.optString("communicationStyle"),
+            customInstructions = doc.optString("customInstructions"),
+            model = doc.optString("model"),
+            temperature = doc.optDouble("temperature", 0.7),
+            ttsEnabled = doc.optBoolean("ttsEnabled", false),
+            autoRead = doc.optBoolean("autoRead", false),
+            ttsRate = doc.optDouble("ttsRate", 1.0).toFloat(),
+            ttsPitch = doc.optDouble("ttsPitch", 1.0).toFloat(),
+            ttsVoice = doc.optString("ttsVoice"),
+            sttLanguage = doc.optString("sttLanguage"),
+            hapticsEnabled = doc.optBoolean("hapticsEnabled", true),
+            animationsEnabled = doc.optBoolean("animationsEnabled", true),
+            callModeEnabled = doc.optBoolean("callModeEnabled", true),
+            greetingEnabled = doc.optBoolean("greetingEnabled", true),
+            continuousEnabled = doc.optBoolean("continuousEnabled", true),
+            imagesEnabled = doc.optBoolean("imagesEnabled", true),
+            studyModeEnabled = doc.optBoolean("studyModeEnabled", false),
+            captureIntervalSec = doc.optInt("captureIntervalSec", 5),
+            defaultSessionKind = doc.optString("defaultSessionKind", SessionKind.DEFAULT.id),
+            updatedAtMillis = doc.optLong("updatedAt", 0L)
+        )
+    } catch (e: Exception) {
+        SettingsCloud()
+    }
+
+    // -------------------------------------------------------- v1.0 device data
+
+    fun encodeDeviceManifest(manifest: DeviceManifest): String = JSONObject()
+        .put("version", LAYOUT_VERSION)
+        .put("deviceId", manifest.deviceId)
+        .put("appVersion", manifest.appVersion)
+        .put("createdAt", manifest.createdAtMillis)
+        .toString(2)
+
+    fun decodeDeviceManifest(json: String): DeviceManifest = try {
+        val doc = JSONObject(json)
+        DeviceManifest(
+            deviceId = doc.optString("deviceId"),
+            appVersion = doc.optString("appVersion"),
+            createdAtMillis = doc.optLong("createdAt", 0L)
+        )
+    } catch (e: Exception) {
+        DeviceManifest()
+    }
 }
+
+/** Non-secret, syncable settings snapshot (v1.0). Never contains API keys. */
+data class SettingsCloud(
+    val personalityName: String = "",
+    val presetId: String = "casual",
+    val humorLevel: Int = 2,
+    val detailLevel: Int = 2,
+    val communicationStyle: String = "",
+    val customInstructions: String = "",
+    val model: String = "",
+    val temperature: Double = 0.7,
+    val ttsEnabled: Boolean = false,
+    val autoRead: Boolean = false,
+    val ttsRate: Float = 1.0f,
+    val ttsPitch: Float = 1.0f,
+    val ttsVoice: String = "",
+    val sttLanguage: String = "",
+    val hapticsEnabled: Boolean = true,
+    val animationsEnabled: Boolean = true,
+    val callModeEnabled: Boolean = true,
+    val greetingEnabled: Boolean = true,
+    val continuousEnabled: Boolean = true,
+    val imagesEnabled: Boolean = true,
+    val studyModeEnabled: Boolean = false,
+    val captureIntervalSec: Int = 5,
+    val defaultSessionKind: String = SessionKind.DEFAULT.id,
+    val updatedAtMillis: Long = 0L
+)
+
+/** Device identity manifest for the Data/ folder (v1.0). */
+data class DeviceManifest(
+    val deviceId: String = "",
+    val appVersion: String = "",
+    val createdAtMillis: Long = 0L
+)

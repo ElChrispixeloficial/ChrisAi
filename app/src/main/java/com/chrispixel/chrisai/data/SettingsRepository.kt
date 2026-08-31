@@ -137,9 +137,39 @@ class SettingsRepository(
         .map { prefs -> (prefs[KEY_CAPTURE_INTERVAL] ?: 5).coerceIn(2, 60) }
         .stateIn(scope, SharingStarted.Eagerly, 5)
 
+    // ------------------------------------------------------------ v1.0 flags
+
+    /** v1.0: first-run onboarding completed (Google Drive or "sin sincronización"). */
+    val onboardingCompleted: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_ONBOARDING_DONE] ?: false }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /** v1.0: Drive synchronization opt-in (off by default, existing installs safe). */
+    val driveSyncEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_DRIVE_SYNC_ENABLED] ?: false }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /** v1.0: email of the Google account authorized for Drive ("" = none). */
+    val driveAccountEmail: StateFlow<String> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_DRIVE_ACCOUNT].orEmpty() }
+        .stateIn(scope, SharingStarted.Eagerly, "")
+
     init {
-        scope.launch { migrateLegacyPreferences() }
+        scope.launch { bootstrap() }
     }
+
+    /** Legacy preference import + one-shot v1.0 migration (existing users skip onboarding). */
+    private suspend fun bootstrap() {
+        migrateLegacyPreferences()
+        val prefs = context.settingsDataStore.data.first()
+        if (!prefs.contains(KEY_ONBOARDING_DONE) && hasAppUsageEvidence(prefs)) {
+            context.settingsDataStore.edit { it[KEY_ONBOARDING_DONE] = true }
+        }
+    }
+
+    /** True when the DataStore already carries any ChrisAI setting (previous usage). */
+    private fun hasAppUsageEvidence(prefs: androidx.datastore.preferences.core.Preferences): Boolean =
+        prefs.asMap().isNotEmpty()
 
     suspend fun setApiKey(value: String) {
         val trimmed = value.trim()
@@ -238,6 +268,20 @@ class SettingsRepository(
 
     suspend fun setCaptureIntervalSec(seconds: Int) {
         context.settingsDataStore.edit { it[KEY_CAPTURE_INTERVAL] = seconds.coerceIn(2, 60) }
+    }
+
+    // ------------------------------------------------------------- v1.0 flags
+
+    suspend fun setOnboardingCompleted(done: Boolean) {
+        context.settingsDataStore.edit { it[KEY_ONBOARDING_DONE] = done }
+    }
+
+    suspend fun setDriveSyncEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_DRIVE_SYNC_ENABLED] = enabled }
+    }
+
+    suspend fun setDriveAccountEmail(email: String) {
+        context.settingsDataStore.edit { it[KEY_DRIVE_ACCOUNT] = email.trim() }
     }
 
     /** One-time import of the old SharedPreferences-based settings (v"1.0"). */
@@ -345,6 +389,9 @@ class SettingsRepository(
         val KEY_IMAGES_ENABLED = booleanPreferencesKey("images_enabled")
         val KEY_STUDY_MODE = booleanPreferencesKey("study_mode")
         val KEY_CAPTURE_INTERVAL = intPreferencesKey("capture_interval")
+        val KEY_ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
+        val KEY_DRIVE_SYNC_ENABLED = booleanPreferencesKey("drive_sync_enabled")
+        val KEY_DRIVE_ACCOUNT = stringPreferencesKey("drive_account_email")
         const val DEFAULT_TEMPERATURE = 0.7
         const val PLAIN_PREFIX = "plain:"
     }

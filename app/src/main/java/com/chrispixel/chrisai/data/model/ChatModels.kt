@@ -44,7 +44,9 @@ data class ChatSession(
     val model: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
-    val messages: List<ChatMessage> = emptyList()
+    val messages: List<ChatMessage> = emptyList(),
+    // v1.0: session context type (General/Estudio/Programación/ChrisAI/Acompañante).
+    val kind: SessionKind = SessionKind.DEFAULT
 )
 
 data class AiModel(

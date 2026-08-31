@@ -31,7 +31,7 @@ class AppContainer(application: Application) {
         application,
         AppDatabase::class.java,
         "chrisai.db"
-    ).addMigrations(AppDatabase.MIGRATION_1_2).build()
+    ).addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3).build()
 
     val settings: SettingsRepository = SettingsRepository(application, appScope)
     val memory: MemoryStore = MemoryStore(database)
@@ -69,6 +69,14 @@ class AppContainer(application: Application) {
     private val toolsProvider = AndroidToolsProvider(application)
     val tools: ToolRegistry = toolsProvider.registry
     val toolManager: ToolManager = ToolManager(tools)
+
+    // v1.0 Drive sync: real transport (OkHttp REST v3) + local bridge to Room/DataStore.
+    val driveService: com.chrispixel.chrisai.data.drive.DriveService =
+        com.chrispixel.chrisai.data.drive.DriveService(com.chrispixel.chrisai.data.drive.OkHttpDriveClient())
+    val driveFiles: com.chrispixel.chrisai.data.drive.LocalSyncStore =
+        com.chrispixel.chrisai.data.drive.LocalSyncStore(application, chatStore, memory, settings)
+    val syncManager: com.chrispixel.chrisai.data.drive.SyncManager =
+        com.chrispixel.chrisai.data.drive.SyncManager(driveService, driveFiles)
 
     val chatRepository: ChatRepository = ChatRepository(
         api = api,

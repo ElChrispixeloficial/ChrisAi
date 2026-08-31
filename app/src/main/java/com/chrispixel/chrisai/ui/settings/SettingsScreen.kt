@@ -1,5 +1,10 @@
 package com.chrispixel.chrisai.ui.settings
 
+import android.Manifest
+import android.accounts.AccountManager
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -30,6 +36,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -157,6 +164,20 @@ fun SettingsScreen(vm: ChrisViewModel) {
             onAdd = { vm.addMemory(it) },
             onRemove = { vm.removeMemory(it) },
             onDismissFeedback = { vm.dismissMemoryFeedback() }
+        )
+
+        SectionHeader("Copia de seguridad (Drive)")
+        DriveSection(
+            enabled = state.driveSyncEnabled,
+            email = state.driveAccountEmail,
+            syncing = state.driveSyncing,
+            lastSync = state.driveLastSync,
+            message = state.driveSyncMessage,
+            accounts = state.googleAccounts,
+            onRefreshAccounts = { vm.refreshGoogleAccounts() },
+            onConnect = { vm.connectDrive(it) },
+            onSync = { vm.syncDriveNow() },
+            onDisconnect = { vm.disconnectDrive() }
         )
 
         SectionHeader("Actualizaciones")
@@ -880,5 +901,150 @@ private fun VideoStudySection(
             "durante la videollamada.",
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+/** v1.0 manual Drive backup: state, last sync, sync now and disconnect. */
+@Composable
+private fun DriveSection(
+    enabled: Boolean,
+    email: String,
+    syncing: Boolean,
+    lastSync: String?,
+    message: String?,
+    accounts: List<String>,
+    onRefreshAccounts: () -> Unit,
+    onConnect: (String) -> Unit,
+    onSync: () -> Unit,
+    onDisconnect: () -> Unit
+) {
+    var showAccounts by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            onRefreshAccounts()
+            showAccounts = true
+        }
+    }
+
+    if (!enabled) {
+        OutlinedButton(
+            onClick = {
+                if (com.chrispixel.chrisai.data.drive.GoogleAccountPicker.hasPermission(context)) {
+                    onRefreshAccounts()
+                    showAccounts = true
+                } else {
+                    permissionLauncher.launch(Manifest.permission.GET_ACCOUNTS)
+                }
+            }
+        ) {
+            Text("Conectar con Google")
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Tu historial, memoria y ajustes se guardan en cada sincronización. " +
+                "Puedes conectarlo ahora o más tarde.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (showAccounts) {
+            DriveAccountDialog(
+                accounts = accounts,
+                syncing = syncing,
+                onPick = { email ->
+                    showAccounts = false
+                    onConnect(email)
+                },
+                onDismiss = { showAccounts = false }
+            )
+        }
+        return
+    }
+
+    Text(email, style = MaterialTheme.typography.bodyLarge)
+    Text(
+        "Solo se guardan archivos creados por ChrisAI en tu Drive.",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    lastSync?.let {
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Última sincronización: hoy a las $it",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    message?.let {
+        Spacer(Modifier.height(4.dp))
+        Text(
+            it,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (it.startsWith("No se pudo") || it.startsWith("Sincronización"))
+                MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
+        )
+    }
+
+    Spacer(Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedButton(onClick = onSync, enabled = !syncing && enabled) {
+            if (syncing) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text("Sincronizar ahora")
+        }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(onClick = onDisconnect, enabled = enabled) {
+            Text("Desconectar")
+        }
+    }
+}
+
+@Composable
+private fun DriveAccountDialog(
+    accounts: List<String>,
+    syncing: Boolean,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Elige tu cuenta de Google") },
+        text = {
+            if (accounts.isEmpty() && !syncing) {
+                Column {
+                    Text("No se encontraron cuentas de Google en este dispositivo.")
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent("android.intent.action.ADD_ACCOUNT").apply {
+                                    putExtra(AccountManager.KEY_ACCOUNT_TYPE, "com.google")
+                                }
+                            )
+                            onDismiss()
+                        }
+                    ) {
+                        Text("Añadir cuenta")
+                    }
+                }
+            } else {
+                Column {
+                    accounts.forEach { account ->
+                        TextButton(onClick = { onPick(account) }) {
+                            Text(account, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
+        },
+confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancelar") }
+        }
     )
 }

@@ -3,6 +3,7 @@ package com.chrispixel.chrisai.data.local.db
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.chrispixel.chrisai.data.model.SessionKind
 
 @Entity(tableName = "conversations")
 data class ConversationEntity(
@@ -10,7 +11,9 @@ data class ConversationEntity(
     val title: String,
     val model: String,
     val createdAt: Long,
-    val updatedAt: Long
+    val updatedAt: Long,
+    // v1.0: session context kind (see SessionKind). Room v3 default keeps old rows safe.
+    val kind: String = SessionKind.DEFAULT.id
 )
 
 @Entity(

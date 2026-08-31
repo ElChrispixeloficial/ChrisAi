@@ -7,6 +7,7 @@ import com.chrispixel.chrisai.data.local.db.MessageEntity
 import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
+import com.chrispixel.chrisai.data.model.SessionKind
 
 /**
  * Conversations persisted in Room. Schema is versioned so updates can migrate
@@ -83,7 +84,8 @@ class ChatStore(private val db: AppDatabase) {
         model = model,
         createdAt = createdAt,
         updatedAt = updatedAt,
-        messages = messages
+        messages = messages,
+        kind = SessionKind.fromId(kind)
     )
 
     private fun ChatSession.toEntity(): ConversationEntity = ConversationEntity(
@@ -91,7 +93,8 @@ class ChatStore(private val db: AppDatabase) {
         title = title,
         model = model,
         createdAt = createdAt,
-        updatedAt = updatedAt
+        updatedAt = updatedAt,
+        kind = kind.id
     )
 
     private fun ChatMessage.toEntity(sessionId: String, position: Int): MessageEntity = MessageEntity(

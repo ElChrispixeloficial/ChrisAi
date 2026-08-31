@@ -8,6 +8,7 @@ import com.chrispixel.chrisai.data.model.AiModel
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
 import com.chrispixel.chrisai.data.model.Memory
+import com.chrispixel.chrisai.data.model.SessionKind
 import com.chrispixel.chrisai.data.personality.PersonalityPrompt
 import com.chrispixel.chrisai.data.provider.ProviderEngine
 import com.chrispixel.chrisai.data.remote.OpenRouterApi
@@ -77,7 +78,9 @@ class ChatRepository(
                 relevantMemories = relevantMemories,
                 foregroundAppLabel = foregroundApp(),
                 lastVisionAnalysis = visionAnalysis(),
-                studyActive = studyActive()
+                studyActive = studyActive(),
+                sessionKind = session.kind,
+                companionActive = session.kind == SessionKind.COMPANION
             )
         )
 

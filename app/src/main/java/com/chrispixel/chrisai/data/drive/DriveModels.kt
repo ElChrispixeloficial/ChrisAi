@@ -1,5 +1,7 @@
 package com.chrispixel.chrisai.data.drive
 
+import com.chrispixel.chrisai.data.model.SessionKind
+
 /** Remote metadata of one file/folder entry (v0.8 cloud memory). */
 data class CloudEntry(
     val path: String,                 // "Memory.json", "Conversations/conv_37.json"
@@ -144,7 +146,9 @@ data class CloudConversation(
     val title: String,
     val createdAtMillis: Long = 0L,
     val updatedAtMillis: Long = 0L,
-    val messages: List<CloudMessage> = emptyList()
+    val messages: List<CloudMessage> = emptyList(),
+    // v1.0: session context kind (see SessionKind); absent in v0.9 backups.
+    val kind: String = SessionKind.DEFAULT.id
 )
 
 data class CloudMessage(

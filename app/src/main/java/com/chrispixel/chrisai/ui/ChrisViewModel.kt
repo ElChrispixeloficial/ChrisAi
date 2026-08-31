@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.chrispixel.chrisai.BuildConfig
 import com.chrispixel.chrisai.ChrisApplication
+import com.chrispixel.chrisai.data.drive.GoogleAccountPicker
 import com.chrispixel.chrisai.data.actions.ActionContextStore
 import com.chrispixel.chrisai.data.actions.ActionPlanner
 import com.chrispixel.chrisai.data.actions.FastAction
@@ -30,6 +31,7 @@ import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
 import com.chrispixel.chrisai.data.model.Memory
+import com.chrispixel.chrisai.data.model.SessionKind
 import com.chrispixel.chrisai.data.permissions.CapabilityId
 import com.chrispixel.chrisai.data.permissions.CapabilityStatus
 import com.chrispixel.chrisai.data.permissions.PermissionCenter
@@ -71,6 +73,7 @@ data class UpdateUiState(
 data class ChatUiState(
     val sessions: List<ChatSession> = emptyList(),
     val currentSessionId: String? = null,
+    val sessionKind: SessionKind = SessionKind.DEFAULT,
     val messages: List<ChatMessage> = emptyList(),
     val streaming: Boolean = false,
     val error: String? = null,
@@ -118,6 +121,8 @@ data class ChatUiState(
     val imageError: String? = null,
     // v0.9: videollamada (controlled visual capture), study mode, permissions.
     val videoCallActive: Boolean = false,
+    // v1.0: standalone video-call screen (camera + ChrisAI avatar).
+    val videoCallScreenOpen: Boolean = false,
     val cameraActive: Boolean = false,
     val screenSharing: Boolean = false,
     val videoError: String? = null,
@@ -127,6 +132,15 @@ data class ChatUiState(
     val hasVisionFrame: Boolean = false,
     val permissions: List<CapabilityStatus> = emptyList(),
     val driveConnected: Boolean = false,
+    // v1.0 onboarding + Google Drive backup.
+    val initialized: Boolean = false,
+    val onboardingCompleted: Boolean = false,
+    val googleAccounts: List<String> = emptyList(),
+    val driveSyncEnabled: Boolean = false,
+    val driveAccountEmail: String = "",
+    val driveSyncing: Boolean = false,
+    val driveLastSync: String? = null,
+    val driveSyncMessage: String? = null,
     val providerFallbackAvailable: Boolean = false
 )
 
@@ -184,7 +198,11 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 studyModeEnabled = container.settings.studyModeEnabled.value,
                 captureIntervalSec = container.settings.captureIntervalSec.value,
                 providerFallbackAvailable = container.providerEngine.fallbackVisionCapable,
-                messagesSent = first?.messages?.count { it.role == ChatRole.USER } ?: 0
+                messagesSent = first?.messages?.count { it.role == ChatRole.USER } ?: 0,
+                initialized = true,
+                onboardingCompleted = container.settings.onboardingCompleted.value,
+                driveSyncEnabled = container.settings.driveSyncEnabled.value,
+                driveAccountEmail = container.settings.driveAccountEmail.value
             )
             container.contextSource.studyActive = _state.value.studyModeEnabled
             observeTts()
@@ -280,6 +298,21 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // -------------------------------------------------- v0.9 videollamada
+
+    /** Opens the standalone video-call screen; starts the voice session on entry. */
+    fun openVideoCall() {
+        val current = _state.value
+        if (!current.callActive && current.callModeEnabled) {
+            startCall()
+        }
+        _state.update { it.copy(videoCallScreenOpen = true) }
+    }
+
+    /** Closes the standalone screen. [hangUp] ends the call (and stops capture). */
+    fun closeVideoCall(hangUp: Boolean) {
+        if (hangUp && _state.value.callActive) endCall()
+        _state.update { it.copy(videoCallScreenOpen = false) }
+    }
 
     fun toggleCamera() {
         if (_state.value.cameraActive) stopCamera() else startCamera()
@@ -499,6 +532,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             _state.value = _state.value.copy(
                 currentSessionId = session.id,
                 messages = session.messages,
+                sessionKind = session.kind,
                 error = null,
                 emotion = Emotion.NEUTRAL,
                 emotionState = null,
@@ -507,13 +541,14 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun startNewChat() {
+    fun startNewChat(kind: SessionKind = _state.value.sessionKind) {
         streamingJob?.cancel()
         container.tts.stop()
         val current = _state.value
         _state.value = current.copy(
             currentSessionId = null,
             messages = emptyList(),
+            sessionKind = kind,
             error = null,
             emotion = Emotion.NEUTRAL,
             emotionState = null,
@@ -522,6 +557,22 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             listening = false,
             sttPartial = null
         )
+    }
+
+    /** Switches the working context; independent conversations per kind. */
+    fun selectSessionKind(kind: SessionKind) {
+        val current = _state.value
+        if (current.currentSessionId == null) {
+            _state.value = current.copy(sessionKind = kind)
+            return
+        }
+        val active = current.sessions.firstOrNull { it.id == current.currentSessionId }
+        if (active == null || active.kind == kind) {
+            _state.value = current.copy(sessionKind = kind)
+            return
+        }
+        val existing = current.sessions.firstOrNull { it.kind == kind }
+        if (existing != null) openSession(existing.id) else startNewChat(kind)
     }
 
     fun deleteSession(id: String) {
@@ -1300,7 +1351,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
         val base: ChatSession = current.currentSessionId
             ?.let { id -> current.sessions.firstOrNull { it.id == id } }
-            ?: ChatSession(model = model, createdAt = now)
+            ?: ChatSession(model = model, createdAt = now, kind = current.sessionKind)
 
         val titleSource = text.ifBlank { "📷 Imagen" }
         val withUser = base.copy(
@@ -1403,7 +1454,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         val now = System.currentTimeMillis()
         val base: ChatSession = current.currentSessionId
             ?.let { id -> current.sessions.firstOrNull { it.id == id } }
-            ?: ChatSession(model = current.selectedModel, createdAt = now)
+            ?: ChatSession(model = current.selectedModel, createdAt = now, kind = current.sessionKind)
 
         val withMessages = base.copy(
             title = if (base.messages.isEmpty()) userText.take(TITLE_MAX_CHARS) else base.title,
@@ -1520,6 +1571,108 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun redactedError(e: Exception): String =
         e.message?.replace(container.settings.apiKey.value, "***") ?: "error desconocido"
+
+    // ---------------------------------------------------------- v1.0 Drive
+
+    /** Reads the Google accounts visible on the device (GET_ACCOUNTS granted). */
+    fun refreshGoogleAccounts() {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val list = withContext(Dispatchers.IO) { GoogleAccountPicker.accounts(ctx) }
+            _state.update { it.copy(googleAccounts = list) }
+        }
+    }
+
+    /** Skips the cloud backup; the app works fully offline. */
+    fun skipOnboarding() {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.settings.setOnboardingCompleted(true)
+            _state.update { it.copy(onboardingCompleted = true) }
+        }
+    }
+
+    fun connectDrive(email: String) = runSync(email = email, completeOnboarding = true)
+
+    fun syncDriveNow() = runSync(email = _state.value.driveAccountEmail, completeOnboarding = false)
+
+    private fun runSync(email: String, completeOnboarding: Boolean) {
+        if (_state.value.driveSyncing) return
+        val byEmail = email.isNotBlank()
+        viewModelScope.launch {
+            _state.update { it.copy(driveSyncing = true, driveSyncMessage = null) }
+            val ctx = getApplication<Application>()
+            val outcome = withContext(Dispatchers.IO) out@{
+                if (byEmail) {
+                    val token = GoogleAccountPicker.requestToken(ctx, email)
+                    if (token == null) {
+                        return@out "No se pudo autorizar la cuenta en Google."
+                    }
+                    val result = container.syncManager.sync(token)
+                    if (result.errors.isNotEmpty()) {
+                        GoogleAccountPicker.invalidateToken(ctx, token)
+                        return@out "Sincronización con errores: ${result.errors.first()}"
+                    }
+                    if (completeOnboarding) {
+                        container.settings.setDriveAccountEmail(email)
+                        container.settings.setDriveSyncEnabled(true)
+                    }
+                    summarize(result)
+                } else {
+                    // A sincronización manual requiere cuenta y token previo.
+                    "No hay cuenta conectada para sincronizar."
+                }
+            }
+            if (completeOnboarding && byEmail && !outcome.startsWith("No se pudo") && !outcome.startsWith("Sincronización con errores")) {
+                container.settings.setOnboardingCompleted(true)
+            }
+            _state.update {
+                it.copy(
+                    driveSyncing = false,
+                    driveSyncMessage = outcome,
+                    driveLastSync = if (outcome.startsWith("Sincronización")) {
+                        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())
+                    } else {
+                        it.driveLastSync
+                    },
+                    onboardingCompleted = if (completeOnboarding) true else it.onboardingCompleted,
+                    driveSyncEnabled = if (completeOnboarding && byEmail) true else it.driveSyncEnabled,
+                    driveAccountEmail = if (completeOnboarding && byEmail) email else it.driveAccountEmail
+                )
+            }
+        }
+    }
+
+    /** Disconnects the account and revokes the stored OAuth token. */
+    fun disconnectDrive() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            val email = _state.value.driveAccountEmail
+            if (email.isNotBlank()) {
+                GoogleAccountPicker.requestToken(ctx, email)?.let {
+                    GoogleAccountPicker.invalidateToken(ctx, it)
+                }
+            }
+            container.settings.setDriveAccountEmail("")
+            container.settings.setDriveSyncEnabled(false)
+            _state.update {
+                it.copy(
+                    driveSyncEnabled = false,
+                    driveAccountEmail = "",
+                    driveLastSync = null,
+                    driveSyncMessage = null
+                )
+            }
+        }
+    }
+
+    private fun summarize(result: com.chrispixel.chrisai.data.drive.SyncResult): String {
+        val parts = mutableListOf<String>()
+        if (result.uploaded.isNotEmpty()) parts.add("subidas: ${result.uploaded.size}")
+        if (result.downloaded.isNotEmpty()) parts.add("descargas: ${result.downloaded.size}")
+        if (result.deletedRemotes.isNotEmpty()) parts.add("borrados: ${result.deletedRemotes.size}")
+        if (result.conflictsKeptLocal.isNotEmpty()) parts.add("conflictos resueltos: ${result.conflictsKeptLocal.size}")
+        return if (parts.isEmpty()) "Todo al día." else "Sincronización completada (${parts.joinToString(", ")})."
+    }
 
     private companion object {
         const val PLACEHOLDER_ID = "__streaming_placeholder__"

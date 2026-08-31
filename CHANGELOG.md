@@ -1,6 +1,32 @@
 # Changelog
 
-## v0.9.0 — Videollamada, Permission Center y Fast Actions (actual)
+## v1.0.0 — Release estable ChrisAI (actual)
+
+- **Onboarding con Google Drive** (`ui/OnboardingScreen.kt` + `data/drive/`):
+  primera opción "Continuar con Google" (permisos mínimos vía AccountManager +
+  token `drive.file`, sin play-services); copia de seguridad con estructura
+  `ChrisAI/{Conversations,Memory,Settings,Data}/`, lectora de los backups v0.8
+  de la raíz, tombstones de borrado y SIN secretos en el cloud. Opción "Usar
+  sin sincronización" para no depender del login local.
+- **HOME** (`ui/HomeScreen.kt`): dashboard con tarjeta de Drive (estado/última
+  sync), acciones rápidas (Conversar, Videollamada, Llamada, Modo estudio,
+  Historial), "Guardar algo en mi memoria" y continuación de conversaciones.
+- **Sesiones por contexto** (`SessionKind` + `ContextChips`): contextos
+  independientes General/Estudio/Programación/Proyecto ChrisAI/Acompañante con
+  sus prompts propios; migración Room v2→v3 no destructiva.
+- **Videollamada independiente** (`ui/video/VideoCallScreen.kt`): pantalla
+  completa con cámara del usuario + avatar ChrisAI, micrófono/pantalla/qué
+  ves/colgar reutilizando la infraestructura de llamada y VisionFrameBus.
+- **Avatar 3D** (`ui/components/ChrisAvatar.kt`): ChrisAI blanco redondeado con
+  pantalla negra, ojos/boca cyan neón y torso "Chris AI" en Compose puro;
+  reacciona a la emoción y al estado en vivo.
+- **Provider Engine pulido**: reintentos acotados del mismo proveedor antes de
+  fallback único; errores fatales (401/403) jamás reintentan.
+- versionCode 11.
+- **Tests**: +DriveServiceTest, +SyncManagerTest, +CloudCodecSettingsTest,
+  +ContextEngineSessionTest → 189 unit tests verdes.
+
+## v0.9.0 — Videollamada, Permission Center y Fast Actions (previo)
 
 - **Videollamada con visión** (`data/vision/`): activación explícita de cámara
   (Camera2, captura JPEG periódica acotada, 2–60 s configurable) y de pantalla

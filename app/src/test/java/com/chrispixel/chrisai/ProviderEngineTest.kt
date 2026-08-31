@@ -59,18 +59,46 @@ class ProviderEngineTest {
     }
 
     @Test
-    fun `recoverable error falls back exactly once`() {
+    fun `recoverable error retries with backoff then falls back exactly once`() {
         val primary = FakeProvider("ro", failure = ProviderCallException(ProviderErrorType.RETRYABLE, 429, "rate"))
         val fallback = FakeProvider("gem")
         val engine = ProviderEngine(primary, fallback, "gem", visionNo)
         val reply = call(engine)
         assertEquals("gem", reply.text)
-        assertEquals(1, primary.streamCalls)
+        // 1 initial attempt + 2 bounded retries, then a single fallback call.
+        assertEquals(1 + ProviderEngine.DEFAULT_MAX_PRIMARY_RETRIES, primary.streamCalls)
         assertEquals(1, fallback.streamCalls)
     }
 
     @Test
-    fun `fatal error never falls back`() {
+    fun `transient primary recovers and never falls back`() {
+        var first = true
+        val primary = object : AiProvider {
+            override val id = "ro"
+            override val baseModel = "ro"
+            override fun capabilities() = setOf(AiCapability.TEXT, AiCapability.STREAMING)
+            var calls = 0
+            override suspend fun stream(request: ProviderRequest, onDelta: (String) -> Unit): ProviderReply {
+                calls++
+                if (first) {
+                    first = false
+                    throw ProviderCallException(ProviderErrorType.RETRYABLE, 503, "overload")
+                }
+                onDelta("ro")
+                return ProviderReply(text = "ro", totalMs = 1)
+            }
+            override suspend fun cancel() = Unit
+        }
+        val fallback = FakeProvider("gem")
+        val engine = ProviderEngine(primary, fallback, "gem", visionNo)
+        val reply = call(engine)
+        assertEquals("ro", reply.text)
+        assertEquals(2, primary.calls)
+        assertEquals(0, fallback.streamCalls)
+    }
+
+    @Test
+    fun `fatal error never retries nor falls back`() {
         val primary = FakeProvider("ro", failure = ProviderCallException(ProviderErrorType.FATAL, 401, "bad key"))
         val fallback = FakeProvider("gem")
         val engine = ProviderEngine(primary, fallback, "gem", visionNo)
@@ -94,7 +122,7 @@ class ProviderEngineTest {
         } catch (_: ProviderCallException) {
             // expected
         }
-        assertEquals(1, primary.streamCalls)
+        assertEquals(1 + ProviderEngine.DEFAULT_MAX_PRIMARY_RETRIES, primary.streamCalls)
     }
 
     @Test
@@ -119,6 +147,7 @@ class ProviderEngineTest {
         } catch (_: ProviderCallException) {
             // expected
         }
+        assertEquals(1 + ProviderEngine.DEFAULT_MAX_PRIMARY_RETRIES, primary.streamCalls)
         assertEquals(0, fallback.streamCalls)
     }
 

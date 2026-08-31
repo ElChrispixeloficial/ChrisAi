@@ -1,6 +1,7 @@
 package com.chrispixel.chrisai.data.provider
 
 import com.chrispixel.chrisai.data.vision.VisionSupport
+import kotlinx.coroutines.delay
 
 /** Classifies a model id for vision without any network call. */
 fun interface VisionClassifier {
@@ -10,20 +11,26 @@ fun interface VisionClassifier {
 /**
  * Routes chat requests to the best provider.
  *
- * Rules (v0.9 provider engine):
+ * Rules (v0.9 provider engine, v1.0 bounded backoff):
  * - OpenRouter is always the primary provider.
  * - A task that needs vision AND whose model cannot see goes straight to the
  *   fallback (Gemini) when it declares the VISION capability.
- * - Recoverable errors (429/timeout/5xx/network) on the primary trigger exactly
- *   ONE attempt on the fallback. Fatal errors (401/403/other permanent 4xx)
- *   never fall back, so a bad key can't cause an infinite loop.
+ * - Recoverable errors (429/timeout/5xx/network) on the primary trigger a
+ *   bounded retry of the SAME provider with exponential backoff
+ *   (maxPrimaryRetries, never indefinite); if it still fails, exactly ONE
+ *   attempt on the fallback. Fatal errors (401/403/other permanent 4xx) never
+ *   retry or fall back, so a bad key can't cause an infinite loop.
  * - Provider keys are never rotated.
  */
 class ProviderEngine(
     private val primary: AiProvider,
     private val fallback: AiProvider?,
     private val fallbackKey: String,
-    private val visionClassifier: VisionClassifier
+    private val visionClassifier: VisionClassifier,
+    // v1.0: retries of the same provider before giving up (bounded backoff).
+    private val maxPrimaryRetries: Int = 2,
+    private val backoffBaseMs: Long = 500L,
+    private val backoffMaxMs: Long = 4000L
 ) {
 
     val primaryId: String get() = primary.id
@@ -55,7 +62,7 @@ class ProviderEngine(
         }
 
         return try {
-            primary.stream(request, onDelta)
+            primaryWithBackoff(request, onDelta)
         } catch (e: ProviderCallException) {
             if (e.kind != ProviderErrorType.RETRYABLE) throw e
             if (fallback == null || fallbackKey.isBlank()) throw e
@@ -63,6 +70,35 @@ class ProviderEngine(
             if (needsVision && AiCapability.VISION !in fallback.capabilities()) throw e
             fallback.stream(request, onDelta)
         }
+    }
+
+    /**
+     * Runs the primary with a bounded number of retries for recoverable errors
+     * and exponential backoff. Fatal errors and non-retryable failures surface
+     * immediately (the caller decides about fallback).
+     */
+    private suspend fun primaryWithBackoff(
+        request: ProviderRequest,
+        onDelta: (String) -> Unit
+    ): ProviderReply {
+        var attempt = 0
+        while (true) {
+            try {
+                return primary.stream(request, onDelta)
+            } catch (e: ProviderCallException) {
+                if (attempt >= maxPrimaryRetries || e.kind != ProviderErrorType.RETRYABLE) throw e
+                attempt++
+                delay(backoffMs(attempt))
+            }
+        }
+    }
+
+    private fun backoffMs(attempt: Int): Long =
+        minOf(backoffBaseMs * (1L shl (attempt - 1)), backoffMaxMs)
+
+    companion object {
+        /** Bounded retries of the primary before a single fallback attempt. */
+        const val DEFAULT_MAX_PRIMARY_RETRIES = 2
     }
 
     /** Interrupts whichever provider is streaming right now. */

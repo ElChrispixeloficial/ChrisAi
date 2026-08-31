@@ -3,6 +3,7 @@ package com.chrispixel.chrisai.data.context
 import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.Memory
+import com.chrispixel.chrisai.data.model.SessionKind
 import com.chrispixel.chrisai.data.tools.ToolResult
 
 /**
@@ -27,7 +28,10 @@ object ContextEngine {
         val relevantMemories: List<Memory>,
         val foregroundAppLabel: String? = null,
         val lastVisionAnalysis: String? = null,
-        val studyActive: Boolean = false
+        val studyActive: Boolean = false,
+        // v1.0: session context (per-session type) and companion mode.
+        val sessionKind: SessionKind = SessionKind.DEFAULT,
+        val companionActive: Boolean = false
     )
 
     data class Bundle(
@@ -35,7 +39,9 @@ object ContextEngine {
         val memoryBlock: String?,
         val appBlock: String?,
         val visionBlock: String?,
-        val studyBlock: String?
+        val studyBlock: String?,
+        val sessionBlock: String?,
+        val companionBlock: String?
     )
 
     /** Produces the bounded context packet for the current turn. */
@@ -77,8 +83,18 @@ object ContextEngine {
                 }
             }
 
-        val studyBlock = if (input.studyActive) {
+        // v1.0 session framing. STUDY sessions get the full pedagogical contract
+        // (deduplicated with the legacy study-mode toggle: same output, no dup).
+        val studyBlock = if (input.studyActive || input.sessionKind == SessionKind.STUDY) {
             StudyPrompt.block
+        } else null
+
+        val sessionBlock = SessionPrompts.block(input.sessionKind)
+
+        // v1.0 companion block: full contract on companion sessions or live mode.
+        // The session framing above stays a light identity line (no duplication).
+        val companionBlock = if (input.sessionKind == SessionKind.COMPANION || input.companionActive) {
+            CompanionPrompt.block
         } else null
 
         return Bundle(
@@ -86,7 +102,9 @@ object ContextEngine {
             memoryBlock = memoryBlock,
             appBlock = appBlock,
             visionBlock = visionBlock,
-            studyBlock = studyBlock
+            studyBlock = studyBlock,
+            sessionBlock = sessionBlock,
+            companionBlock = companionBlock
         )
     }
 
@@ -98,6 +116,8 @@ object ContextEngine {
     fun toSystemBlocks(bundle: Bundle): List<Pair<String, String>> = buildList {
         bundle.memoryBlock?.let { add("MEMORIA" to it) }
         bundle.appBlock?.let { add("CONTEXTO DE APP" to it) }
+        bundle.sessionBlock?.let { add("CONTEXTO DE SESIÓN" to it) }
+        bundle.companionBlock?.let { add("MODO ACOMPAÑANTE" to it) }
         bundle.visionBlock?.let { add("VISIÓN (observación actual)" to it) }
         bundle.studyBlock?.let { add("MODO ESTUDIO" to it) }
     }
@@ -129,4 +149,51 @@ object StudyPrompt {
             "- Cuando haya una imagen de pantalla/libro, explícala paso a paso señalando las partes.\n" +
             "- Es una herramienta educativa: fomenta que llegue a la respuesta por sí mismo.\n" +
             "- No soltar un examen final ni largas listas sin relación; mantén el ritmo del usuario."
+}
+
+/**
+ * v1.0 bound, per-session framing. It complements (never replaces) the existing
+ * blocks: the full pedagogical contract of STUDY lives in [StudyPrompt] and is
+ * injected once via the study block, so the session framing stays light.
+ */
+object SessionPrompts {
+
+    fun identityLine(kind: SessionKind): String = when (kind) {
+        SessionKind.GENERAL -> ""
+        SessionKind.STUDY -> "[SESIÓN DE ESTUDIO] El usuario está aprendiendo un tema."
+        SessionKind.PROGRAMMING -> "[SESIÓN DE PROGRAMACIÓN] El usuario está desarrollando software."
+        SessionKind.CHRISAI -> "[SESIÓN PROYECTO CHRISAI] El usuario quiere hablar del desarrollo de ChrisAI, esta misma aplicación."
+        SessionKind.COMPANION -> "[SESIÓN DE ACOMPAÑANTE] El usuario quiere compañía en una conversación prolongada."
+    }
+
+    fun contract(kind: SessionKind): String? = when (kind) {
+        SessionKind.GENERAL, SessionKind.STUDY, SessionKind.CHRISAI, SessionKind.COMPANION -> null
+        SessionKind.PROGRAMMING ->
+            "Sé preciso y concreto: responde con código claro y bien formado, " +
+                "explica las decisiones técnicas relevantes y señala riesgos o alternativas."
+    }
+
+    /** The session block for non-general kinds, or null (keeps GENERAL identical). */
+    fun block(kind: SessionKind): String? {
+        val identity = identityLine(kind)
+        val contractText = contract(kind)
+        return buildString {
+            if (identity.isNotBlank()) append(identity)
+            if (contractText != null) {
+                if (identity.isNotBlank()) append('\n')
+                append(contractText)
+            }
+        }.takeIf { it.isNotBlank() }
+    }
+}
+
+/** v1.0 companion-mode behavioral contract (explicit, prolonged sessions). */
+object CompanionPrompt {
+    const val block: String =
+        "[MODO ACOMPAÑANTE]\n" +
+            "Estás acompañando al usuario durante un tiempo prolongado y de forma explícita.\n" +
+            "- Mantén la conversación presente y cercana, sin interrumpir ni abrumar.\n" +
+            "- Responde a lo que dice y haz seguimiento natural de los hilos.\n" +
+            "- No uses cámara ni pantalla a menos que el usuario lo autorice expresamente.\n" +
+            "- Cuando el usuario pida terminar, despídete con claridad y deja la sesión cerrada."
 }

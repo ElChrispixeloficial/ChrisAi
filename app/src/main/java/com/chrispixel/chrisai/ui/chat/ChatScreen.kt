@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -35,6 +37,8 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -85,6 +89,7 @@ import com.chrispixel.chrisai.data.emotion.Emotion
 import com.chrispixel.chrisai.data.live.LiveStage
 import com.chrispixel.chrisai.data.model.ChatMessage
 import com.chrispixel.chrisai.data.model.ChatRole
+import com.chrispixel.chrisai.data.model.SessionKind
 import com.chrispixel.chrisai.data.speech.TtsStatus
 import com.chrispixel.chrisai.data.tools.ToolResultStatus
 import com.chrispixel.chrisai.data.tools.android.ToolEvent
@@ -197,6 +202,7 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
                     onInterrupt = { vm.interruptCall() }
                 )
             }
+            ContextChips(selected = state.sessionKind, onSelect = { vm.selectSessionKind(it) })
             if (state.callActive) {
                 VideoCallBar(
                     cameraActive = state.cameraActive,
@@ -374,6 +380,27 @@ private fun ToolIndicators(events: List<ToolEvent>) {
             )
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ContextChips(selected: SessionKind, onSelect: (SessionKind) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        SessionKind.entries.forEach { kind ->
+            FilterChip(
+                selected = selected == kind,
+                onClick = { onSelect(kind) },
+                label = { Text(kind.title) }
+            )
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
