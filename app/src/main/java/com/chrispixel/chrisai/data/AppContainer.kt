@@ -7,6 +7,7 @@ import com.chrispixel.chrisai.data.haptics.Haptics
 import com.chrispixel.chrisai.data.local.ChatStore
 import com.chrispixel.chrisai.data.local.MemoryStore
 import com.chrispixel.chrisai.data.local.db.AppDatabase
+import com.chrispixel.chrisai.data.media.MediaPlayerController
 import com.chrispixel.chrisai.data.provider.GeminiProvider
 import com.chrispixel.chrisai.data.provider.OpenRouterProvider
 import com.chrispixel.chrisai.data.provider.ProviderEngine
@@ -31,7 +32,12 @@ class AppContainer(application: Application) {
         application,
         AppDatabase::class.java,
         "chrisai.db"
-    ).addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3).build()
+    ).addMigrations(
+        AppDatabase.MIGRATION_1_2,
+        AppDatabase.MIGRATION_2_3,
+        AppDatabase.MIGRATION_3_4,
+        AppDatabase.MIGRATION_4_5
+    ).build()
 
     val settings: SettingsRepository = SettingsRepository(application, appScope)
     val memory: MemoryStore = MemoryStore(database)
@@ -64,6 +70,13 @@ class AppContainer(application: Application) {
     val tts: TtsController = TtsController(application)
     val stt: SttController = SttController(application)
     val haptics: Haptics = Haptics(application, settings)
+
+    // v1.1: independent media player (audio files; NOT the TTS live voice).
+    val mediaPlayer: MediaPlayerController = MediaPlayerController()
+
+    // v1.1: Developer Mode local agent (SAF folder + file reading for the chat).
+    val devAgent: com.chrispixel.chrisai.data.devagent.DeveloperAgent =
+        com.chrispixel.chrisai.data.devagent.DeveloperAgent(application)
 
     // v0.7 ChrisTools: structured, safe tool execution.
     private val toolsProvider = AndroidToolsProvider(application)

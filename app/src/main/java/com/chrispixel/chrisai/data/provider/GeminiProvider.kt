@@ -20,7 +20,6 @@ class GeminiProvider(
         AiCapability.STREAMING,
         AiCapability.VISION
     )
-
     override suspend fun stream(
         request: ProviderRequest,
         onDelta: (String) -> Unit

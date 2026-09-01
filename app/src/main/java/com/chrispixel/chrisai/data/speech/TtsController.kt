@@ -1,6 +1,7 @@
 package com.chrispixel.chrisai.data.speech
 
 import android.content.Context
+import android.media.AudioManager
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -55,6 +56,10 @@ class TtsController(context: Context) {
     private val appContext = context.applicationContext
     private val previewLabel = "__voice_preview__"
 
+    // v1.1: duck other audio while ChrisAI speaks (gentle, not full focus steal).
+    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    private var hasAudioFocus = false
+
     private val _status = MutableStateFlow<TtsStatus>(TtsStatus.Unavailable)
     val status: StateFlow<TtsStatus> = _status.asStateFlow()
 
@@ -102,6 +107,7 @@ class TtsController(context: Context) {
 
                             override fun onDone(utteranceId: String?) {
                                 if (utteranceId == currentMessageId || utteranceId == previewLabel) {
+                                    abandonAudioFocus()
                                     _status.value = TtsStatus.Idle
                                     currentMessageId = null
                                 }
@@ -109,11 +115,13 @@ class TtsController(context: Context) {
 
                             @Deprecated("Deprecated in Java")
                             override fun onError(utteranceId: String?) {
+                                abandonAudioFocus()
                                 _status.value = TtsStatus.Idle
                                 currentMessageId = null
                             }
 
                             override fun onError(utteranceId: String?, errorCode: Int) {
+                                abandonAudioFocus()
                                 _status.value = TtsStatus.Idle
                                 currentMessageId = null
                             }
@@ -178,6 +186,7 @@ class TtsController(context: Context) {
             engine.setSpeechRate(pendingRate)
             engine.setPitch(pendingPitch)
             currentMessageId = messageId
+            requestAudioFocus()
             _status.value = TtsStatus.Speaking(messageId, clean)
             engine.speak(
                 clean,
@@ -195,12 +204,58 @@ class TtsController(context: Context) {
         speakClean(previewLabel, TtsText.prepare(text), rate, pitch)
     }
 
+    /**
+     * v1.1: synthesizes [rawText] into an audio file (independent of live speak).
+     * The file is written to [outputPath] as the engine's native format (WAV/PCM
+     * or configured container) and completion is awaited so the caller knows the
+     * file is fully written. Zeroes neither the live status nor steals audio
+     * focus, so it never interrupts the chat/call voice.
+     */
+    suspend fun synthesizeToFile(
+        rawText: String,
+        outputPath: String,
+        rate: Float,
+        pitch: Float
+    ): Boolean {
+        val engine = tts ?: return false
+        val clean = TtsText.prepare(rawText)
+        if (clean.isBlank()) return false
+        return try {
+            engine.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
+            engine.setPitch(pitch.coerceIn(0.5f, 2.0f))
+            val file = java.io.File(outputPath)
+            file.parentFile?.mkdirs()
+            val utteranceId = "chrisai_tts_${System.currentTimeMillis()}"
+            val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            val expectedId = utteranceId
+            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    if (utteranceId == expectedId) done.complete(file.exists() && file.length() > 0)
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    if (utteranceId == expectedId) done.complete(false)
+                }
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    if (utteranceId == expectedId) done.complete(false)
+                }
+            })
+            val result = engine.synthesizeToFile(clean, null, file, expectedId)
+            if (result != android.speech.tts.TextToSpeech.SUCCESS) return false
+            done.await()
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     /** Pauses the current utterance; resumes from the same point if supported. */
     fun pause() {
         val current = _status.value
         if (current !is TtsStatus.Speaking) return
         try {
             tts?.stop()
+            abandonAudioFocus()
             _status.value = TtsStatus.Paused(current.messageId, current.text)
         } catch (_: Throwable) {
             _status.value = current
@@ -219,6 +274,7 @@ class TtsController(context: Context) {
         } catch (_: Throwable) {
             // ignored
         }
+        abandonAudioFocus()
         currentMessageId = null
         _status.value = TtsStatus.Idle
     }
@@ -232,6 +288,29 @@ class TtsController(context: Context) {
         }
         tts = null
         isReady = false
+    }
+
+    private fun requestAudioFocus() {
+        val manager = audioManager ?: return
+        try {
+            hasAudioFocus = manager.requestAudioFocus(
+                null,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } catch (_: Throwable) {
+            hasAudioFocus = false
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        val manager = audioManager ?: run { hasAudioFocus = false; return }
+        try {
+            if (hasAudioFocus) manager.abandonAudioFocus(null)
+        } catch (_: Throwable) {
+            // ignore
+        }
+        hasAudioFocus = false
     }
 
     /** Applies a cached voice preference once available. */

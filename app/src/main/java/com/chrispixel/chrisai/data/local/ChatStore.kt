@@ -110,7 +110,9 @@ class ChatStore(private val db: AppDatabase) {
         totalMs = totalMs,
         promptTokens = promptTokens,
         completionTokens = completionTokens,
-        imagePath = imagePath
+        imagePath = imagePath,
+        generatedImagePath = generatedImagePath,
+        audioPath = audioPath
     )
 
     private fun MessageEntity.toDomain(): ChatMessage = ChatMessage(
@@ -124,6 +126,8 @@ class ChatStore(private val db: AppDatabase) {
         totalMs = totalMs,
         promptTokens = promptTokens,
         completionTokens = completionTokens,
-        imagePath = imagePath
+        imagePath = imagePath,
+        generatedImagePath = generatedImagePath,
+        audioPath = audioPath
     )
 }

@@ -122,6 +122,11 @@ class SettingsRepository(
         .map { prefs -> prefs[KEY_CALL_CONTINUOUS_ENABLED] ?: true }
         .stateIn(scope, SharingStarted.Eagerly, true)
 
+    /** v1.1: real barge-in while ChrisAI speaks in call mode, on by default. */
+    val bargeInEnabled: StateFlow<Boolean> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_BARGE_IN_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
     /** v0.8.1: send images/vision messages, on by default. */
     val imagesEnabled: StateFlow<Boolean> = context.settingsDataStore.data
         .map { prefs -> prefs[KEY_IMAGES_ENABLED] ?: true }
@@ -152,6 +157,11 @@ class SettingsRepository(
     /** v1.0: email of the Google account authorized for Drive ("" = none). */
     val driveAccountEmail: StateFlow<String> = context.settingsDataStore.data
         .map { prefs -> prefs[KEY_DRIVE_ACCOUNT].orEmpty() }
+        .stateIn(scope, SharingStarted.Eagerly, "")
+
+    /** v1.1: Developer Mode — persisted SAF folder URI for the local agent ("" = none). */
+    val devAgentUri: StateFlow<String> = context.settingsDataStore.data
+        .map { prefs -> prefs[KEY_DEV_AGENT_URI].orEmpty() }
         .stateIn(scope, SharingStarted.Eagerly, "")
 
     init {
@@ -256,6 +266,10 @@ class SettingsRepository(
         context.settingsDataStore.edit { it[KEY_CALL_CONTINUOUS_ENABLED] = enabled }
     }
 
+    suspend fun setBargeInEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_BARGE_IN_ENABLED] = enabled }
+    }
+
     suspend fun setImagesEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { it[KEY_IMAGES_ENABLED] = enabled }
     }
@@ -282,6 +296,11 @@ class SettingsRepository(
 
     suspend fun setDriveAccountEmail(email: String) {
         context.settingsDataStore.edit { it[KEY_DRIVE_ACCOUNT] = email.trim() }
+    }
+
+    /** v1.1: persists the Developer Mode local agent folder URI ("" = none). */
+    suspend fun setDevAgentUri(uri: String) {
+        context.settingsDataStore.edit { it[KEY_DEV_AGENT_URI] = uri.trim() }
     }
 
     /** One-time import of the old SharedPreferences-based settings (v"1.0"). */
@@ -386,12 +405,14 @@ class SettingsRepository(
         val KEY_CALL_MODE_ENABLED = booleanPreferencesKey("call_mode_enabled")
         val KEY_CALL_GREETING_ENABLED = booleanPreferencesKey("call_greeting_enabled")
         val KEY_CALL_CONTINUOUS_ENABLED = booleanPreferencesKey("call_continuous_enabled")
+        val KEY_BARGE_IN_ENABLED = booleanPreferencesKey("barge_in_enabled")
         val KEY_IMAGES_ENABLED = booleanPreferencesKey("images_enabled")
         val KEY_STUDY_MODE = booleanPreferencesKey("study_mode")
         val KEY_CAPTURE_INTERVAL = intPreferencesKey("capture_interval")
         val KEY_ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
         val KEY_DRIVE_SYNC_ENABLED = booleanPreferencesKey("drive_sync_enabled")
         val KEY_DRIVE_ACCOUNT = stringPreferencesKey("drive_account_email")
+        val KEY_DEV_AGENT_URI = stringPreferencesKey("dev_agent_uri")
         const val DEFAULT_TEMPERATURE = 0.7
         const val PLAIN_PREFIX = "plain:"
     }

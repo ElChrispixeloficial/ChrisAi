@@ -109,4 +109,42 @@ class ProviderEngine(
 
     private fun canSee(model: String): Boolean =
         visionClassifier.support(model) != VisionSupport.NOT_SUPPORTED
+
+    /**
+     * v1.1: generates an image from [prompt]. Uses the primary provider when it
+     * advertises IMAGE_GENERATION; on a retryable error it falls back to the
+     * fallback provider when that one can generate too. [model] is the image
+     * model id and [primaryKey]/[fallbackKeyOverride] are the resolved keys the
+     * providers need (they are not resolved internally for generation).
+     */
+    suspend fun generateImage(
+        model: String,
+        prompt: String,
+        primaryKey: String,
+        fallbackKeyOverride: String? = null
+    ): ByteArray? {
+        val primaryGenerates = AiCapability.IMAGE_GENERATION in primary.capabilities()
+        val fallbackGenerates = fallback != null &&
+            AiCapability.IMAGE_GENERATION in fallback.capabilities()
+
+        if (primaryGenerates) {
+            try {
+                return primary.generateImage(model, prompt, primaryKey)
+            } catch (e: ProviderCallException) {
+                if (e.kind != ProviderErrorType.RETRYABLE || !fallbackGenerates) throw e
+            } catch (_: Throwable) {
+                if (!fallbackGenerates) return null
+            }
+        }
+        if (fallbackGenerates) {
+            val key = fallbackKeyOverride?.takeIf { it.isNotBlank() } ?: fallbackKey
+            if (key.isBlank()) throw ProviderCallException(
+                ProviderErrorType.FATAL, 0, "No hay una clave configurada para generar imágenes."
+            )
+            return fallback?.generateImage(model, prompt, key)
+        }
+        throw ProviderCallException(
+            ProviderErrorType.FATAL, 0, "Ningún proveedor configurado puede generar imágenes."
+        )
+    }
 }

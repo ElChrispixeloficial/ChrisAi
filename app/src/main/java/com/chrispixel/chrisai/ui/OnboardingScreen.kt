@@ -56,6 +56,15 @@ fun OnboardingScreen(vm: ChrisViewModel) {
         }
     }
 
+    // v1.1: waits for the "Añadir cuenta" result and reopens the picker with
+    // the fresh account list, so a cancelled flow never leaves the user stuck.
+    val addAccountLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        vm.refreshGoogleAccounts()
+        showAccounts = true
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -157,12 +166,12 @@ fun OnboardingScreen(vm: ChrisViewModel) {
                         Spacer(Modifier.height(12.dp))
                         TextButton(
                             onClick = {
-                                context.startActivity(
+                                showAccounts = false
+                                addAccountLauncher.launch(
                                     Intent("android.intent.action.ADD_ACCOUNT").apply {
                                         putExtra(AccountManager.KEY_ACCOUNT_TYPE, "com.google")
                                     }
                                 )
-                                showAccounts = false
                             }
                         ) {
                             Text("Añadir cuenta")

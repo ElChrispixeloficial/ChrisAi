@@ -1,6 +1,48 @@
 # Changelog
 
-## v1.0.0 — Release estable ChrisAI (actual)
+## v1.1.0 — ChrisAI (actual)
+
+- **Avatar 3D GL real** (`ui/avatar3d/`): `AvatarRenderer` GL ES 3.0 con rig,
+  animador y `ChrisAvatar3D` composable. ChrisAI se dibuja con Vertex/Fragment
+  shaders (cuerpo blanco, pantalla negra, ojos/boca cyan). Presente en la
+  videollamada y, a 190×220dp, en el centro del HOME. NO es 2D ni `rotationY`.
+- **Videollamada front/back con hot-swap** (`data/vision/CameraCaptureSession.kt`):
+  el `switchCamera(facing)` cambia el objetivo en caliente sin cortar el
+  pipeline ni `VisionFrameBus`; el preview se refleja (espejo) en frontal,
+  chip "🔄 Frontal/Trasera" y etiquetas "Pausar/Reanudar"; el estado
+  `cameraFacing` está en el UiState.
+- **Voz real** (`ui/settings/SettingsScreen.kt` + `data/speech/`):
+  - **Selector de voces** (`VoiceSection`): búsqueda, filtro por idioma
+    (`VoiceLangChip`), botón "Probar" y etiqueta idioma/región.
+  - **Acciones por mensaje** (`MessageActionsRow`): 🔊 Leer / ⏸ Pausar /
+    ▶ Continuar / ■, 📋 Copiar (portapapeles) y ↗️ Compartir (ACTION_SEND).
+  - **Barge-in real** (`data/speech/BargeInVad.kt`): VAD de energía por
+    AudioRecord 16kHz, umbral adaptativo sobre el floor y cool-down; al
+    interrumpir se corta el TTS y se re-escucha. Activable en Ajustes.
+  - **Audio focus ducking**: el TTS atenúa la música de fondo al hablar.
+- **Onboarding Drive + HOME avatar 3D** (`ui/OnboardingScreen.kt` +
+  `ui/HomeScreen.kt`): `runSync` endurecido que nunca cierra la app y marca el
+  onboarding como completado aunque falle; BroadcastReceiver de cambio de
+  cuentas; `addAccountLauncher` que reabre el selector tras añadir cuenta.
+- **Generación de imágenes** (`data/remote/OpenRouterApi.kt` +
+  `data/provider/`): `images/generations` con `dall-e-3`, guardar en galería,
+  compartir con FileProvider, banner de progreso con cancelar y tarjeta de
+  resultado; el fallback solo saltaría si el proveedor declara la capacidad.
+- **Generación de audio + reproductor independiente**
+  (`data/media/MediaPlayerController.kt`): botón 🎵, TTS se sintetiza a `.wav`
+  en disco y se reproduce con su propio MediaPlayer (play/pausa/progreso,
+  guardar, compartir) totalmente independiente del habla viva de la llamada.
+- **Developer Mode (agente local SAF)**
+  (`ui/dev/DeveloperModeScreen.kt` + `data/devagent/`): elige una carpeta de tu
+  dispositivo o de Google Drive vía Storage Access Framework con acceso de
+  lectura persistente; lista sus archivos y adjunta el contenido de archivos de
+  texto al chat como contexto. Accesible desde Ajustes.
+- Migraciones Room v3→v4 (`generatedImagePath`) y v4→v5 (`audioPath`) no
+  destructivas; FileProvider expone `files-path attachments/`.
+- versionCode 12.
+- **Tests**: el conjunto completo sigue en verde (200 unit tests).
+
+## v1.0.0 — Release estable ChrisAI (previo)
 
 - **Onboarding con Google Drive** (`ui/OnboardingScreen.kt` + `data/drive/`):
   primera opción "Continuar con Google" (permisos mínimos vía AccountManager +

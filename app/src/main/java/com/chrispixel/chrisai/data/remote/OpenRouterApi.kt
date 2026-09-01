@@ -243,4 +243,70 @@ class OpenRouterApi(
             else -> OpenRouterException.Http(code, "HTTP $code: $message")
         }
     }
+
+    /**
+     * Generates an image through OpenRouter's images/generations endpoint
+     * (OpenAI-compatible). Decodes the first `b64_json` result into PNG bytes.
+     * Returns null when the provider returns no usable image.
+     */
+    suspend fun generateImage(
+        model: String,
+        prompt: String,
+        apiKey: String
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) throw OpenRouterException.NoApiKey()
+
+        val payload = JSONObject().apply {
+            put("model", model)
+            put("prompt", prompt)
+            put("n", 1)
+            put("response_format", "b64_json")
+        }.toString()
+
+        val request = Request.Builder()
+            .url(baseUrl.toHttpUrl().newBuilder().addPathSegments("images/generations").build())
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .addHeader("X-Title", "ChrisAI")
+            .post(payload.toRequestBody(jsonMediaType))
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            val body = response.body?.bytes() ?: throw OpenRouterException.InvalidResponse("Respuesta vacía")
+            if (!response.isSuccessful) {
+                val text = body.toString(Charsets.UTF_8)
+                throw toOpenRouterException(response.code, text)
+            }
+            try {
+                val json = String(body, Charsets.UTF_8)
+                val arr = JSONObject(json).optJSONArray("data") ?: throw OpenRouterException.InvalidResponse("Sin datos de imagen")
+                val obj = arr.optJSONObject(0) ?: throw OpenRouterException.InvalidResponse("Imagen vacía")
+                val b64 = obj.optString("b64_json")
+                    .ifBlank { obj.optString("url").takeIf { it.isNotBlank() } ?: "" }
+                if (b64.isBlank()) throw OpenRouterException.InvalidResponse("La imagen generada llegó vacía")
+                if (b64.startsWith("http")) {
+                    // URL-based result: fetch the bytes.
+                    val img = client.newCall(
+                        Request.Builder().url(b64).get().build()
+                    ).execute()
+                    try {
+                        if (!img.isSuccessful) throw OpenRouterException.InvalidResponse("No se pudo descargar la imagen")
+                        img.body?.bytes()
+                    } finally {
+                        img.close()
+                    }
+                } else {
+                    try {
+                        android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                    } catch (_: IllegalArgumentException) {
+                        throw OpenRouterException.InvalidResponse("Imagen en formato inválido")
+                    }
+                }
+            } catch (e: OpenRouterException) {
+                throw e
+            } catch (e: Exception) {
+                throw OpenRouterException.InvalidResponse("No se pudo interpretar la imagen generada")
+            }
+        }
+    }
 }

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,6 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -104,6 +107,9 @@ import kotlinx.coroutines.withContext
 fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
     var input by rememberSaveable { mutableStateOf("") }
+    // v1.1: toggles the "generate image" composer (distinct from attach/analyze).
+    var genMode by rememberSaveable { mutableStateOf(false) }
+    var genPrompt by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     val context = LocalContext.current
 
@@ -166,15 +172,32 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
                 listening = state.listening,
                 imagesEnabled = state.imagesEnabled,
                 pendingImage = state.pendingImage,
-                onPickImage = {
-                    imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                genMode = genMode,
+                genPrompt = genPrompt,
+                generating = state.generatingImage,
+                onToggleGen = {
+                    genMode = !genMode
+                    if (!genMode) genPrompt = ""
                 },
+                onGenPromptChange = { genPrompt = it },
                 onClearImage = { vm.clearPendingImage() },
                 onSend = {
                     if (input.isNotBlank() || state.pendingImage != null) {
                         vm.sendMessage(input)
                         input = ""
                     }
+                },
+                onGenerate = {
+                    if (genPrompt.isNotBlank() && !state.generatingImage) {
+                        vm.generateImage(genPrompt)
+                        genPrompt = ""
+                        genMode = false
+                    }
+                },
+                onCancelGenerate = { vm.cancelImageGeneration() },
+                onPickImage = {
+                    genMode = false
+                    imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
                 onStop = { vm.stopStreaming() },
                 onMicClick = {
@@ -226,6 +249,17 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
             if (state.error != null) {
                 ErrorBanner(message = state.error!!, onDismiss = { vm.dismissError() })
             }
+            if (state.generatingImage) {
+                GeneratingImageBanner(onCancel = { vm.cancelImageGeneration() })
+            } else if (state.imageGenerationError != null) {
+                ErrorBanner(
+                    message = state.imageGenerationError!!,
+                    onDismiss = { vm.dismissImageGenerationError() }
+                )
+            }
+            if (state.imageError != null) {
+                ErrorBanner(message = state.imageError!!, onDismiss = { vm.dismissImageError() })
+            }
             if (state.listening) {
                 ListeningBanner()
             }
@@ -273,8 +307,17 @@ fun ChatScreen(vm: ChrisViewModel, onOpenSettings: () -> Unit) {
                                 message = message,
                                 ttsEnabled = state.ttsEnabled,
                                 ttsStatus = state.ttsStatus,
+                                mediaState = state.mediaState,
                                 onSpeak = { vm.speakMessage(message.id, message.content) },
-                                onStopSpeak = { vm.stopSpeech() }
+                                onStopSpeak = { vm.stopSpeech() },
+                                onCopy = { vm.copyMessage(message.content) },
+                                onShare = { vm.shareMessage(message.content) },
+                                onSaveGenerated = { vm.saveGeneratedImageToGallery(message.generatedImagePath ?: "") },
+                                onShareGenerated = { vm.shareGeneratedImage(message.generatedImagePath ?: "") },
+                                onToggleAudio = { vm.toggleAudioPlayback(message.audioPath ?: "") },
+                                onSeekAudio = { vm.seekAudio(it) },
+                                onSaveAudio = { vm.saveAudioToDevice(message.audioPath ?: "") },
+                                onShareAudio = { vm.shareAudio(message.audioPath ?: "") }
                             )
                         }
                     }
@@ -504,6 +547,30 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
     }
 }
 
+/** v1.1: shows progress while an image is being generated (with cancel). */
+@Composable
+private fun GeneratingImageBanner(onCancel: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Spacer(Modifier.width(10.dp))
+            Text("🎨 Generando imagen…", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = onCancel) { Text("Cancelar") }
+        }
+    }
+}
+
 @Composable
 private fun ListeningBanner() {
     Surface(
@@ -567,8 +634,17 @@ private fun MessageBubble(
     message: ChatMessage,
     ttsEnabled: Boolean,
     ttsStatus: TtsStatus,
+    mediaState: com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState,
     onSpeak: () -> Unit,
-    onStopSpeak: () -> Unit
+    onStopSpeak: () -> Unit,
+    onCopy: () -> Unit,
+    onShare: () -> Unit,
+    onSaveGenerated: () -> Unit,
+    onShareGenerated: () -> Unit,
+    onToggleAudio: () -> Unit,
+    onSeekAudio: (Int) -> Unit,
+    onSaveAudio: () -> Unit,
+    onShareAudio: () -> Unit
 ) {
     val isUser = message.role == ChatRole.USER
     val shape = if (isUser) {
@@ -639,11 +715,32 @@ private fun MessageBubble(
                 }
                 else -> {
                     Column {
-                        MarkdownText(
-                            text = message.content,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
+                        message.audioPath?.let { path ->
+                            AudioBubble(
+                                path = path,
+                                mediaState = mediaState,
+                                onToggle = onToggleAudio,
+                                onSeek = onSeekAudio,
+                                onSave = onSaveAudio,
+                                onShare = onShareAudio,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            )
+                        }
+                        message.generatedImagePath?.let { path ->
+                            GeneratedImageCard(
+                                path = path,
+                                onSave = onSaveGenerated,
+                                onShare = onShareGenerated,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            )
+                        }
+                        if (message.content.isNotBlank()) {
+                            MarkdownText(
+                                text = message.content,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                         if (!message.streamed && (message.totalMs != null || message.promptTokens != null || message.completionTokens != null)) {
                             Text(
                                 metricsLabel(message),
@@ -653,12 +750,15 @@ private fun MessageBubble(
                             )
                             Spacer(Modifier.height(4.dp))
                         }
-                        if (!message.streamed && ttsEnabled && message.content.isNotBlank()) {
-                            TtsButtonRow(
+                        if (!message.streamed && message.content.isNotBlank()) {
+                            MessageActionsRow(
                                 messageId = message.id,
                                 status = ttsStatus,
+                                allowSpeak = ttsEnabled,
                                 onSpeak = onSpeak,
-                                onStop = onStopSpeak
+                                onStop = onStopSpeak,
+                                onCopy = onCopy,
+                                onShare = onShare
                             )
                             Spacer(Modifier.height(6.dp))
                         }
@@ -670,11 +770,14 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun TtsButtonRow(
+private fun MessageActionsRow(
     messageId: String,
     status: TtsStatus,
+    allowSpeak: Boolean,
     onSpeak: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    onCopy: () -> Unit,
+    onShare: () -> Unit
 ) {
     val speaking = status is TtsStatus.Speaking && status.messageId == messageId
     val paused = status is TtsStatus.Paused && status.messageId == messageId
@@ -682,12 +785,16 @@ private fun TtsButtonRow(
         modifier = Modifier.padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        TextButton(onClick = onSpeak) {
-            Text(if (speaking) "⏸ Pausar" else if (paused) "▶ Continuar" else "🔊 Leer")
+        if (allowSpeak) {
+            TextButton(onClick = onSpeak) {
+                Text(if (speaking) "⏸ Pausar" else if (paused) "▶ Continuar" else "🔊 Leer")
+            }
+            if (speaking || paused) {
+                TextButton(onClick = onStop) { Text("■") }
+            }
         }
-        if (speaking || paused) {
-            TextButton(onClick = onStop) { Text("■ Detener") }
-        }
+        TextButton(onClick = onCopy) { Text("📋 Copiar") }
+        TextButton(onClick = onShare) { Text("↗️ Compartir") }
     }
 }
 
@@ -738,9 +845,16 @@ private fun ChatInputBar(
     listening: Boolean,
     imagesEnabled: Boolean,
     pendingImage: String?,
-    onPickImage: () -> Unit,
+    genMode: Boolean,
+    genPrompt: String,
+    generating: Boolean,
+    onToggleGen: () -> Unit,
+    onGenPromptChange: (String) -> Unit,
     onClearImage: () -> Unit,
     onSend: () -> Unit,
+    onGenerate: () -> Unit,
+    onCancelGenerate: () -> Unit,
+    onPickImage: () -> Unit,
     onStop: () -> Unit,
     onMicClick: () -> Unit
 ) {
@@ -754,7 +868,7 @@ private fun ChatInputBar(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        "📷 Imagen lista para enviar",
+                        "📷 Imagen adjunta para analizar",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f)
@@ -764,46 +878,107 @@ private fun ChatInputBar(
                     }
                 }
             }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.Bottom
-            ) {
-                if (imagesEnabled) {
-                    IconButton(onClick = onPickImage) {
-                        Text(
-                            "🖼️",
-                            style = MaterialTheme.typography.bodyLarge,
-                            modifier = Modifier.alpha(0.7f)
-                        )
+            if (genMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "🎨 Describe la imagen que quieres…",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = if (generating) onCancelGenerate else onToggleGen) {
+                        Icon(Icons.Filled.Close, contentDescription = "Cerrar generación")
                     }
                 }
-                IconButton(onClick = onMicClick) {
-                    Text(
-                        "🎙️",
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.alpha(if (listening) 1f else 0.7f)
-                    )
-                }
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = onInputChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text(if (listening) "Habla…" else "Escribe un mensaje…") },
-                    maxLines = 6,
-                    enabled = !streaming
-                )
-                Spacer(Modifier.width(10.dp))
-                FloatingActionButton(
-                    onClick = { if (streaming) onStop() else onSend() },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
+            }
+            if (!genMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.Bottom
                 ) {
-                    if (streaming) {
-                        Icon(Icons.Filled.Close, contentDescription = "Detener")
-                    } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Enviar")
+                    if (imagesEnabled) {
+                        IconButton(onClick = onPickImage) {
+                            Text(
+                                "🖼️",
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.alpha(0.7f)
+                            )
+                        }
+                    }
+                    IconButton(onClick = onToggleGen) {
+                        Text(
+                            "🎨",
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.alpha(if (genMode) 1f else 0.7f)
+                        )
+                    }
+                    IconButton(onClick = onMicClick) {
+                        Text(
+                            "🎙️",
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.alpha(if (listening) 1f else 0.7f)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = onInputChange,
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text(if (listening) "Habla…" else "Escribe un mensaje…") },
+                        maxLines = 6,
+                        enabled = !streaming && !generating
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    FloatingActionButton(
+                        onClick = { if (streaming) onStop() else onSend() },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ) {
+                        if (streaming) {
+                            Icon(Icons.Filled.Close, contentDescription = "Detener")
+                        } else {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Enviar")
+                        }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    OutlinedTextField(
+                        value = genPrompt,
+                        onValueChange = onGenPromptChange,
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("Ej. un robot androide al atardecer, estilo cyberpunk") },
+                        maxLines = 4,
+                        enabled = !generating
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    FloatingActionButton(
+                        onClick = {
+                            if (generating) onCancelGenerate() else onGenerate()
+                        },
+                        containerColor = MaterialTheme.colorScheme.tertiary,
+                        contentColor = MaterialTheme.colorScheme.onTertiary
+                    ) {
+                        if (generating) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                color = MaterialTheme.colorScheme.onTertiary,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text("🎨", style = MaterialTheme.typography.bodyLarge)
+                        }
                     }
                 }
             }
@@ -833,6 +1008,152 @@ private fun AttachedImageThumb(path: String, modifier: Modifier = Modifier) {
             contentScale = ContentScale.Crop
         )
     }
+}
+
+/** v1.1: an assistant-GENERATED image with save (gallery) and share actions. */
+@Composable
+private fun GeneratedImageCard(
+    path: String,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var bitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(path) {
+        bitmap = withContext(Dispatchers.IO) {
+            try {
+                BitmapFactory.decodeFile(path)?.asImageBitmap()
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.medium,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap!!,
+                        contentDescription = "Imagen generada",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Fit
+                    )
+                } else {
+                    Text(
+                        "Imagen no disponible",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onSave) { Text("💾 Guardar") }
+                TextButton(onClick = onShare) { Text("↗️ Compartir") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioBubble(
+    path: String,
+    mediaState: com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState,
+    onToggle: () -> Unit,
+    onSeek: (Int) -> Unit,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val playing = mediaState is com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Playing &&
+        mediaState.path == path
+    val positionMs = when (mediaState) {
+        is com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Playing ->
+            if (mediaState.path == path) mediaState.positionMs else 0
+        is com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Paused ->
+            if (mediaState.path == path) mediaState.positionMs else 0
+        else -> 0
+    }
+    val durationMs = when (mediaState) {
+        is com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Playing ->
+            if (mediaState.path == path) mediaState.durationMs else 0
+        is com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Paused ->
+            if (mediaState.path == path) mediaState.durationMs else 0
+        else -> 0
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.medium,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onToggle) {
+                    Icon(
+                        imageVector = if (playing) Icons.Filled.Close else Icons.Filled.PlayArrow,
+                        contentDescription = if (playing) "Pausar audio" else "Reproducir audio"
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "🎵 ChrisAI Audio",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "${fmtMs(positionMs)} / ${if (durationMs > 0) fmtMs(durationMs) else "--:--"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (durationMs > 0) {
+                Slider(
+                    value = positionMs.toFloat().coerceIn(0f, durationMs.toFloat()),
+                    onValueChange = { onSeek(it.toInt()) },
+                    valueRange = 0f..durationMs.toFloat(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp)
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onSave) { Text("💾 Guardar") }
+                TextButton(onClick = onShare) { Text("↗️ Compartir") }
+            }
+        }
+    }
+}
+
+private fun fmtMs(ms: Int): String {
+    val totalSec = ms / 1000
+    val m = totalSec / 60
+    val s = totalSec % 60
+    return "$m:${s.toString().padStart(2, '0')}"
 }
 
 @Composable

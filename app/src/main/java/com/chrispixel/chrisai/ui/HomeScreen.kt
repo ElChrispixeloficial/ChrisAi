@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.chrispixel.chrisai.data.model.ChatRole
 import com.chrispixel.chrisai.data.model.ChatSession
+import com.chrispixel.chrisai.ui.avatar3d.ChrisAvatar3D
 
 /** v1.0 HOME: a dashboard that opens every ChrisAI function in one tap. */
 @Composable
@@ -86,6 +87,21 @@ fun HomeScreen(
         }
 
         Spacer(Modifier.height(14.dp))
+
+        // v1.1: ChrisAI in 3D, front and center on HOME.
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            ChrisAvatar3D(
+                emotion = state.emotion,
+                stage = state.liveStage,
+                intensity = state.emotionState?.intensity ?: 0f,
+                animationsEnabled = state.animationsEnabled,
+                modifier = Modifier.size(190.dp, 220.dp)
+            )
+        }
+        Spacer(Modifier.height(6.dp))
 
         DriveCard(
             connected = state.driveSyncEnabled,

@@ -12,7 +12,8 @@ enum class AiCapability {
     TEXT,
     STREAMING,
     VISION,
-    TOOLS
+    TOOLS,
+    IMAGE_GENERATION
 }
 
 /** Whether a provider error is safe to retry on a different provider. */
@@ -66,4 +67,20 @@ interface AiProvider {
 
     /** Interrupts the in-flight request, if any. */
     suspend fun cancel()
+
+    /**
+     * Generates an image from [prompt] using the provider's image model
+     * ([model]). Returns the resulting bytes (PNG/JPEG). Implementations that
+     * don't support image generation throw [ProviderCallException] (FATAL) and
+     * are never called by the engine unless the capability is advertised.
+     */
+    suspend fun generateImage(
+        model: String,
+        prompt: String,
+        apiKey: String
+    ): ByteArray? {
+        throw ProviderCallException(
+            ProviderErrorType.FATAL, 0, "Este proveedor no genera imágenes."
+        )
+    }
 }

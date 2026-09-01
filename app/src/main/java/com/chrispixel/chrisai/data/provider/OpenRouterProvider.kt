@@ -24,8 +24,22 @@ class OpenRouterProvider(
         AiCapability.TEXT,
         AiCapability.STREAMING,
         AiCapability.VISION,
-        AiCapability.TOOLS
+        AiCapability.TOOLS,
+        AiCapability.IMAGE_GENERATION
     )
+
+    override suspend fun generateImage(
+        model: String,
+        prompt: String,
+        apiKey: String
+    ): ByteArray? = try {
+        val bytes = api.generateImage(model = model, prompt = prompt, apiKey = apiKey)
+        bytes ?: throw ProviderCallException(
+            ProviderErrorType.FATAL, 0, "El modelo devolvió una imagen vacía."
+        )
+    } catch (e: OpenRouterException) {
+        throw e.toProviderException()
+    }
 
     override suspend fun stream(
         request: ProviderRequest,

@@ -35,7 +35,11 @@ data class ChatMessage(
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
     // v0.8.1: local path of a user-attached image (null for plain text).
-    val imagePath: String? = null
+    val imagePath: String? = null,
+    // v1.1: local path of an assistant-GENERATED image (null otherwise).
+    val generatedImagePath: String? = null,
+    // v1.1: local path of an audio file (synthesized or attached; null otherwise).
+    val audioPath: String? = null
 )
 
 data class ChatSession(

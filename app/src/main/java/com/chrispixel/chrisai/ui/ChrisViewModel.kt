@@ -38,6 +38,7 @@ import com.chrispixel.chrisai.data.permissions.PermissionCenter
 import com.chrispixel.chrisai.data.personality.PersonalityConfig
 import com.chrispixel.chrisai.data.provider.ProviderCallException
 import com.chrispixel.chrisai.data.provider.ProviderErrorType
+import com.chrispixel.chrisai.data.speech.BargeInVad
 import com.chrispixel.chrisai.data.speech.SttEvent
 import com.chrispixel.chrisai.data.speech.TtsStatus
 import com.chrispixel.chrisai.data.tools.ToolCall
@@ -115,15 +116,28 @@ data class ChatUiState(
     val callModeEnabled: Boolean = true,
     val callGreetingEnabled: Boolean = true,
     val callContinuousEnabled: Boolean = true,
+    // v1.1: real barge-in (mic VAD) while the assistant speaks in a call.
+    val bargeInEnabled: Boolean = true,
     val imagesEnabled: Boolean = true,
     // v0.8.1: pending image attachment (absolute path to a local JPEG).
     val pendingImage: String? = null,
     val imageError: String? = null,
+    // v1.1: image generation progress/result for the current request.
+    val generatingImage: Boolean = false,
+    val generatedImagePath: String? = null,
+    val imageGenerationError: String? = null,
+    // v1.1: independent media player state (audio file playback).
+    val mediaState: com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState =
+        com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Idle,
+    val generatingAudio: Boolean = false,
+    val audioError: String? = null,
     // v0.9: videollamada (controlled visual capture), study mode, permissions.
     val videoCallActive: Boolean = false,
     // v1.0: standalone video-call screen (camera + ChrisAI avatar).
     val videoCallScreenOpen: Boolean = false,
     val cameraActive: Boolean = false,
+    // v1.1: which lens the video-call camera is using ("back"/"front").
+    val cameraFacing: String = "back",
     val screenSharing: Boolean = false,
     val videoError: String? = null,
     val studyModeEnabled: Boolean = false,
@@ -141,7 +155,14 @@ data class ChatUiState(
     val driveSyncing: Boolean = false,
     val driveLastSync: String? = null,
     val driveSyncMessage: String? = null,
-    val providerFallbackAvailable: Boolean = false
+    val providerFallbackAvailable: Boolean = false,
+    // v1.1: Developer Mode local agent (SAF folder + files).
+    val devAgentUri: String = "",
+    val devAgentPath: String? = null,
+    val devAgentFiles: List<com.chrispixel.chrisai.data.devagent.DevAgentFile> = emptyList(),
+    val devAgentLoading: Boolean = false,
+    val devAgentMessage: String? = null,
+    val devAttachError: String? = null
 )
 
 class ChrisViewModel(app: Application) : AndroidViewModel(app) {
@@ -152,21 +173,57 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     private var streamingJob: Job? = null
+    // v1.1: in-flight image generation job (independent of the chat stream).
+    private var genImageJob: Job? = null
 
     // v0.8.1: deterministic call/session state machine (Live infra, now wired).
     private val live = LiveStateMachine()
     private var callWaitJob: Job? = null
     private var callPendingText: String? = null
 
+    // v1.1: real barge-in — mic VAD running while the TTS speaks in call mode.
+    private val bargeVad = BargeInVad(getApplication())
+
     // v0.9: cross-action memory + vision capture bookkeeping.
     private val actionContext = ActionContextStore()
     private var latestVisionPath: String? = null
+
+    // v1.1: reflect Google account list changes (added/removed) on the device.
+    private val accountReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            refreshGoogleAccounts()
+        }
+    }
 
     init {
         loadInitial()
         observeVisionSources()
         observeVisionProblems()
         refreshPermissions()
+        observeMedia()
+        initDeveloperAgent()
+        try {
+            val filter = android.content.IntentFilter(android.accounts.AccountManager.LOGIN_ACCOUNTS_CHANGED_ACTION)
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                getApplication<Application>().registerReceiver(
+                    accountReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                getApplication<Application>().registerReceiver(accountReceiver, filter)
+            }
+        } catch (_: Throwable) {
+            // receiver registration failure must never break launch
+        }
+    }
+
+    override fun onCleared() {
+        try {
+            getApplication<Application>().unregisterReceiver(accountReceiver)
+        } catch (_: Throwable) {
+            // ignore
+        }
+        super.onCleared()
     }
 
     private fun loadInitial() {
@@ -194,6 +251,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 callModeEnabled = container.settings.callModeEnabled.value,
                 callGreetingEnabled = container.settings.callGreetingEnabled.value,
                 callContinuousEnabled = container.settings.callContinuousEnabled.value,
+                bargeInEnabled = container.settings.bargeInEnabled.value,
                 imagesEnabled = container.settings.imagesEnabled.value,
                 studyModeEnabled = container.settings.studyModeEnabled.value,
                 captureIntervalSec = container.settings.captureIntervalSec.value,
@@ -232,7 +290,8 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update {
                     it.copy(
                         cameraActive = active,
-                        videoCallActive = it.callActive && (active || it.screenSharing)
+                        // v1.1: video capture is independent of the voice call.
+                        videoCallActive = active || it.screenSharing
                     )
                 }
                 refreshPermissions()
@@ -243,7 +302,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update {
                     it.copy(
                         screenSharing = active,
-                        videoCallActive = it.callActive && (it.cameraActive || active)
+                        videoCallActive = it.cameraActive || active
                     )
                 }
                 refreshPermissions()
@@ -318,6 +377,20 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         if (_state.value.cameraActive) stopCamera() else startCamera()
     }
 
+    /** Hot-swaps the video-call lens (front ↔ back) without dropping the capture. */
+    fun switchCamera() {
+        val next = if (_state.value.cameraFacing == "front") "back" else "front"
+        val facing = if (next == "front") com.chrispixel.chrisai.data.vision.CameraCaptureSession.FACE_FRONT
+        else com.chrispixel.chrisai.data.vision.CameraCaptureSession.FACE_BACK
+        if (_state.value.cameraActive) {
+            container.camera.switchCamera(facing)
+        } else {
+            container.camera.setLensFacing(facing)
+        }
+        _state.update { it.copy(cameraFacing = next) }
+        container.haptics.confirm()
+    }
+
     fun startCamera() {
         if (_state.value.cameraActive) return
         val app = getApplication<Application>()
@@ -328,6 +401,11 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             _state.value = _state.value.copy(videoError = "Necesita dar permiso de cámara para la videollamada.")
             return
         }
+        container.camera.setLensFacing(
+            if (_state.value.cameraFacing == "front")
+                com.chrispixel.chrisai.data.vision.CameraCaptureSession.FACE_FRONT
+            else com.chrispixel.chrisai.data.vision.CameraCaptureSession.FACE_BACK
+        )
         val interval = _state.value.captureIntervalSec
         val dir = File(app.filesDir, ATTACH_DIR)
         container.camera.start(
@@ -486,6 +564,430 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissImageError() {
         _state.value = _state.value.copy(imageError = null)
+    }
+
+    // ------------------------------------------------------- v1.1 Developer Mode (SAF local agent)
+
+    /** Reads the persisted folder at init into the state (folder path + files). */
+    fun initDeveloperAgent() = viewModelScope.launch(Dispatchers.IO) {
+        val uri = container.settings.devAgentUri.value
+        if (uri.isBlank()) return@launch
+        _state.update { it.copy(devAgentUri = uri, devAgentLoading = true, devAgentMessage = null) }
+        refreshDeveloperAgentFilesLocked(uri)
+    }
+
+    /** Called when the user picks a folder via SAF (OpenDocumentTree). */
+    fun setDeveloperAgentFolder(uri: Uri) = viewModelScope.launch(Dispatchers.IO) {
+        container.devAgent.persistFolderAccess(uri)
+        container.settings.setDevAgentUri(uri.toString())
+        _state.update { it.copy(devAgentUri = uri.toString(), devAgentLoading = true, devAgentMessage = null) }
+        refreshDeveloperAgentFilesLocked(uri.toString())
+        container.haptics.confirm()
+    }
+
+    fun refreshDeveloperAgentFiles() {
+        val uri = _state.value.devAgentUri
+        if (uri.isBlank()) return
+        _state.update { it.copy(devAgentLoading = true, devAgentMessage = null) }
+        viewModelScope.launch(Dispatchers.IO) { refreshDeveloperAgentFilesLocked(uri) }
+    }
+
+    private suspend fun refreshDeveloperAgentFilesLocked(uriString: String) {
+        val uri = Uri.parse(uriString)
+        val agent = container.devAgent
+        val path = try {
+            android.provider.DocumentsContract.getTreeDocumentId(uri)
+        } catch (_: Exception) {
+            null
+        }
+        val files = agent.listFiles(uri)
+        _state.update {
+            it.copy(
+                devAgentPath = path,
+                devAgentFiles = files,
+                devAgentLoading = false,
+                devAgentMessage = if (files.isEmpty()) "La carpeta de trabajo está vacía." else null
+            )
+        }
+    }
+
+    fun clearDeveloperAgentFolder() {
+        val uri = _state.value.devAgentUri
+        if (uri.isNotBlank()) {
+            try { container.devAgent.releaseFolderAccess(Uri.parse(uri)) } catch (_: Exception) {}
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            container.settings.setDevAgentUri("")
+        }
+        _state.update {
+            it.copy(devAgentUri = "", devAgentPath = null, devAgentFiles = emptyList(),
+                devAgentLoading = false, devAgentMessage = null, devAttachError = null)
+        }
+    }
+
+    fun dismissDevAttachError() {
+        _state.update { it.copy(devAttachError = null) }
+    }
+
+    /**
+     * Attaches a readable file from the local agent folder into the chat as user
+     * context, then streams ChrisAI's reply.
+     *
+     * Returns true when the attach started a reply (and the caller can pop back).
+     */
+    fun attachDevFile(fileName: String, uriString: String): Boolean {
+        val current = _state.value
+        if (current.streaming) {
+            _state.update { it.copy(devAttachError = "Espera a que termine la respuesta actual.") }
+            return false
+        }
+        val file = current.devAgentFiles.firstOrNull { it.uri == uriString }
+        if (file == null || !container.devAgent.isReadableText(file)) {
+            _state.update {
+                it.copy(devAttachError = "Este archivo no se puede adjuntar como texto.")
+            }
+            return false
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val content = container.devAgent.readTextFile(Uri.parse(uriString))
+            withContext(Dispatchers.Main) {
+                if (content.isNullOrBlank()) {
+                    _state.update {
+                        it.copy(devAttachError = "No se pudo leer el contenido de «$fileName».")
+                    }
+                    return@withContext
+                }
+                _state.update { it.copy(devAttachError = null) }
+                postDevFileMessage(fileName, content)
+            }
+        }
+        return true
+    }
+
+    /** Sends a user message with the file content as context and streams the reply. */
+    private fun postDevFileMessage(fileName: String, content: String) {
+        if (container.settings.apiKey.value.isBlank()) {
+            _state.update { it.copy(devAttachError = "No hay una API key disponible en esta build.") }
+            return
+        }
+        val trimmed = content.trim()
+        if (trimmed.isEmpty()) return
+        if (_state.value.streaming) return
+
+        val header = "📎 He adjuntado el archivo local «$fileName» desde mi carpeta de trabajo. " +
+            "Usa su contenido como contexto:"
+        val text = "$header\n\n$trimmed"
+        container.haptics.confirm()
+        startStreaming(text)
+    }
+
+    // ------------------------------------------------------- v1.1 image generate
+
+    /** Starts generating an image from [prompt]; never blocks the chat. */
+    fun generateImage(prompt: String) {
+        val current = _state.value
+        val trimmed = prompt.trim()
+        if (trimmed.isEmpty()) return
+        if (current.generatingImage) return
+
+        _state.update {
+            it.copy(generatingImage = true, imageGenerationError = null, generatedImagePath = null)
+        }
+        genImageJob = viewModelScope.launch {
+            try {
+                val ctx = getApplication<Application>()
+                val apiKey = container.settings.apiKey.value
+                val result = withContext(Dispatchers.IO) {
+                    container.providerEngine.generateImage(
+                        model = GENERATED_IMAGE_MODEL,
+                        prompt = trimmed,
+                        primaryKey = apiKey
+                    )
+                }
+                if (result == null) {
+                    _state.update {
+                        it.copy(
+                            generatingImage = false,
+                            imageGenerationError = "No se pudo generar la imagen (respuesta vacía)."
+                        )
+                    }
+                    return@launch
+                }
+                val saved = withContext(Dispatchers.IO) { saveGeneratedImage(result) }
+                if (saved == null) {
+                    _state.update {
+                        it.copy(
+                            generatingImage = false,
+                            imageGenerationError = "No se pudo guardar la imagen generada."
+                        )
+                    }
+                    return@launch
+                }
+                addGeneratedMessage(trimmed, saved)
+                container.haptics.confirm()
+                _state.update {
+                    it.copy(generatingImage = false, generatedImagePath = saved, imageGenerationError = null)
+                }
+            } catch (e: com.chrispixel.chrisai.data.provider.ProviderCallException) {
+                _state.update {
+                    it.copy(
+                        generatingImage = false,
+                        imageGenerationError = e.message ?: "Error al generar la imagen."
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                _state.update {
+                    it.copy(
+                        generatingImage = false,
+                        imageGenerationError = "Error inesperado al generar la imagen."
+                    )
+                }
+            }
+        }
+    }
+    fun cancelImageGeneration() {
+        genImageJob?.cancel()
+        _state.update { it.copy(generatingImage = false, imageGenerationError = null) }
+    }
+
+    fun dismissImageGenerationError() {
+        _state.update { it.copy(imageGenerationError = null) }
+    }
+
+    /** Saves a generated image to app storage and appends it as an assistant message. */
+    private suspend fun addGeneratedMessage(prompt: String, path: String) {
+        val current = _state.value
+        val message = ChatMessage(role = ChatRole.ASSISTANT, content = prompt, generatedImagePath = path)
+        val updated = current.copy(
+            messages = current.messages + message,
+            messagesSent = current.messagesSent
+        )
+        _state.value = updated
+        current.currentSessionId?.let { sessionId ->
+            viewModelScope.launch {
+                val session = container.chatStore.find(sessionId)
+                if (session != null) {
+                    container.chatStore.upsert(
+                        session.copy(
+                            messages = session.messages + message,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /** Writes the generated bytes (PNG) to a file in app-private storage. */
+    private fun saveGeneratedImage(bytes: ByteArray): String? {
+        return try {
+            val dir = File(getApplication<Application>().filesDir, ATTACH_DIR).apply { mkdirs() }
+            val file = File(dir, "gen_${UUID.randomUUID()}.png")
+            file.writeBytes(bytes)
+            file.absolutePath
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Copies a generated image file into the system clipboard's content URI for sharing. */
+    fun shareGeneratedImage(path: String) {
+        if (path.isBlank()) return
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                getApplication(), getApplication<Application>().packageName + ".fileprovider", File(path)
+            )
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "image/png"
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            getApplication<Application>().startActivity(
+                android.content.Intent.createChooser(send, "Compartir imagen de ChrisAI").apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        } catch (_: Throwable) {
+            // ignore: no share target
+        }
+    }
+
+    /** Saves a generated image to the system gallery. */
+    fun saveGeneratedImageToGallery(path: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val outcome = try {
+                val file = File(path)
+                if (!file.exists()) return@launch
+                val bytes = file.readBytes()
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@launch
+                val resolver = getApplication<Application>().contentResolver
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "chrisai_${System.currentTimeMillis()}.png")
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                }
+                val uri = resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: return@launch
+                resolver.openOutputStream(uri)?.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                bitmap.recycle()
+            } catch (_: Throwable) {
+                null
+            }
+            if (outcome != null) {
+                _state.update {
+                    it.copy(
+                        imageGenerationError = null,
+                        driveSyncMessage = null
+                    )
+                }
+                container.haptics.confirm()
+            }
+        }
+    }
+
+    // ------------------------------------------------------- v1.1 media player
+
+    private fun observeMedia() {
+        viewModelScope.launch {
+            container.mediaPlayer.state.collect { playback ->
+                _state.update { it.copy(mediaState = playback) }
+            }
+        }
+    }
+
+    fun toggleAudioPlayback(path: String) {
+        if (path.isBlank()) return
+        val current = _state.value.mediaState
+        val playingHere = current is com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Playing &&
+            current.path == path
+        val pausedHere = current is com.chrispixel.chrisai.data.media.MediaPlayerController.PlaybackState.Paused &&
+            current.path == path
+        when {
+            playingHere -> container.mediaPlayer.pause()
+            pausedHere -> container.mediaPlayer.resume()
+            else -> container.mediaPlayer.play(java.io.File(path))
+        }
+    }
+
+    fun seekAudio(positionMs: Int) {
+        container.mediaPlayer.seekTo(positionMs)
+    }
+
+    fun stopAudio() {
+        container.mediaPlayer.stop()
+    }
+
+    fun dismissAudioError() {
+        _state.update { it.copy(audioError = null) }
+    }
+
+    /** v1.1: synthesizes the given text to an audio file and attaches it in a message. */
+    fun generateAudio(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty() || _state.value.generatingAudio) return
+        if (!container.tts.available()) {
+            _state.update { it.copy(audioError = "La síntesis de audio no está disponible todavía.") }
+            return
+        }
+        _state.update { it.copy(generatingAudio = true, audioError = null) }
+        viewModelScope.launch {
+            val current = _state.value
+            val outDir = java.io.File(getApplication<Application>().filesDir, ATTACH_DIR)
+                .apply { mkdirs() }
+            val outFile = java.io.File(outDir, "audio_${java.util.UUID.randomUUID()}.wav")
+            val ok = withContext(Dispatchers.IO) {
+                container.tts.synthesizeToFile(
+                    rawText = trimmed,
+                    outputPath = outFile.absolutePath,
+                    rate = current.ttsRate,
+                    pitch = current.ttsPitch
+                )
+            }
+            if (ok && outFile.exists()) {
+                addAudioMessage(trimmed, outFile.absolutePath)
+                container.haptics.confirm()
+            } else {
+                _state.update {
+                    it.copy(
+                        generatingAudio = false,
+                        audioError = "No se pudo generar el audio. Prueba de nuevo."
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun addAudioMessage(prompt: String, path: String) {
+        val current = _state.value
+        val message = ChatMessage(role = ChatRole.ASSISTANT, content = prompt, audioPath = path)
+        _state.update {
+            it.copy(
+                messages = it.messages + message,
+                generatingAudio = false,
+                audioError = null
+            )
+        }
+        current.currentSessionId?.let { sessionId ->
+            viewModelScope.launch {
+                val session = container.chatStore.find(sessionId)
+                if (session != null) {
+                    container.chatStore.upsert(
+                        session.copy(
+                            messages = session.messages + message,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun shareAudio(path: String) {
+        if (path.isBlank()) return
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                getApplication(), getApplication<Application>().packageName + ".fileprovider", java.io.File(path)
+            )
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "audio/*"
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            getApplication<Application>().startActivity(
+                android.content.Intent.createChooser(send, "Compartir audio de ChrisAI").apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        } catch (_: Throwable) {
+            // ignore: no share target
+        }
+    }
+
+    fun saveAudioToDevice(path: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val file = java.io.File(path)
+                if (!file.exists() || file.length() == 0L) return@launch
+                val resolver = getApplication<Application>().contentResolver
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Audio.Media.DISPLAY_NAME, "chrisai_${System.currentTimeMillis()}.wav")
+                    put(android.provider.MediaStore.Audio.Media.MIME_TYPE, "audio/x-wav")
+                    put(android.provider.MediaStore.Audio.Media.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: return@launch
+                resolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { it.copyTo(out) }
+                }
+                values.clear()
+                values.put(android.provider.MediaStore.Audio.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                container.haptics.confirm()
+            } catch (_: Throwable) {
+                // ignore
+            }
+        }
     }
 
     /** Copies, downscales and compresses the picked image to app storage. */
@@ -699,6 +1201,11 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(callContinuousEnabled = enabled)
     }
 
+    fun setBargeInEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settings.setBargeInEnabled(enabled) }
+        _state.value = _state.value.copy(bargeInEnabled = enabled)
+    }
+
     fun setImagesEnabled(enabled: Boolean) {
         viewModelScope.launch { container.settings.setImagesEnabled(enabled) }
         _state.value = _state.value.copy(imagesEnabled = enabled)
@@ -771,6 +1278,41 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopSpeech() {
         container.tts.stop()
+    }
+
+    // --------------------------------------------------- v1.1 per-message actions
+
+    /** Copies the assistant answer (clean text) to the system clipboard. */
+    fun copyMessage(text: String) {
+        if (text.isBlank()) return
+        try {
+            val manager = getApplication<Application>().getSystemService(
+                android.content.ClipboardManager::class.java
+            )
+            manager?.setPrimaryClip(
+                android.content.ClipData.newPlainText("ChrisAI", text.trim())
+            )
+            container.haptics.confirm()
+        } catch (_: Throwable) {
+            // clipboard unavailable: nothing to do
+        }
+    }
+
+    /** Shares the assistant answer through the Android sharesheet. */
+    fun shareMessage(text: String) {
+        if (text.isBlank()) return
+        try {
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(android.content.Intent.EXTRA_TEXT, text.trim())
+            }
+            val chooser = android.content.Intent.createChooser(send, "Compartir respuesta de Chris AI")
+            chooser.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            getApplication<Application>().startActivity(chooser)
+            container.haptics.confirm()
+        } catch (_: Throwable) {
+            // no app can handle sharing: ignore
+        }
     }
 
     fun dismissTtsError() {
@@ -848,6 +1390,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 current.ttsPitch,
                 Emotion.NEUTRAL
             )
+            startBargeInMonitoring()
             waitForUtteranceThenListen()
         } else if (greetingWanted) {
             container.tts.initialize { result ->
@@ -859,6 +1402,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                         _state.value.ttsPitch,
                         Emotion.NEUTRAL
                     )
+                    startBargeInMonitoring()
                     waitForUtteranceThenListen()
                 } else {
                     armCallListening()
@@ -871,6 +1415,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
 
     fun endCall() {
         if (!_state.value.callActive) return
+        stopBargeInMonitoring()
         callWaitJob?.cancel()
         callPendingText = null
         if (_state.value.streaming) {
@@ -907,6 +1452,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
             } catch (_: CancellationException) {
                 return@launch
             }
+            stopBargeInMonitoring()
             val current = _state.value
             if (!current.callActive) return@launch
             live.on(LiveEvent.TtsFinished)
@@ -1017,6 +1563,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
                 current.ttsPitch,
                 emotion
             )
+            startBargeInMonitoring()
             waitForUtteranceThenListen()
         } else {
             live.on(LiveEvent.TtsFinished)
@@ -1042,6 +1589,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
     /** Tap the mic during a call = barge in and speak immediately. */
     fun interruptCall() {
         if (!_state.value.callActive) return
+        stopBargeInMonitoring()
         callWaitJob?.cancel()
         container.tts.stop()
         live.on(LiveEvent.BargeIn)
@@ -1049,6 +1597,32 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         live.on(LiveEvent.ListenAgain)
         syncLiveStage()
         if (live.state.stage == LiveStage.LISTENING) armCallListening()
+    }
+
+    // ------------------------------------------------------- v1.1 real barge-in
+
+    /** Starts the mic VAD so the user can interrupt the assistant by speaking. */
+    private fun startBargeInMonitoring() {
+        val enabled = _state.value.bargeInEnabled &&
+            _state.value.callActive &&
+            container.tts.status.value is TtsStatus.Speaking
+        if (!enabled) return
+        if (!bargeVad.start(::onBargeInDetected) && _state.value.callActive &&
+            _state.value.bargeInEnabled
+        ) {
+            // Mic unavailable or permission missing: rely on the manual mic tap.
+        }
+    }
+
+    private fun onBargeInDetected() {
+        val status = container.tts.status.value
+        val speaking = status is TtsStatus.Speaking || status is TtsStatus.Paused
+        if (!_state.value.callActive || !speaking) return
+        interruptCall()
+    }
+
+    private fun stopBargeInMonitoring() {
+        bargeVad.stop()
     }
 
     // ------------------------------------------------- v0.9 fast actions
@@ -1601,28 +2175,32 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.update { it.copy(driveSyncing = true, driveSyncMessage = null) }
             val ctx = getApplication<Application>()
-            val outcome = withContext(Dispatchers.IO) out@{
-                if (byEmail) {
-                    val token = GoogleAccountPicker.requestToken(ctx, email)
-                    if (token == null) {
-                        return@out "No se pudo autorizar la cuenta en Google."
+            val outcome = try {
+                withContext(Dispatchers.IO) out@{
+                    if (byEmail) {
+                        val token = GoogleAccountPicker.requestToken(ctx, email)
+                        if (token == null) {
+                            return@out "No se pudo autorizar la cuenta en Google."
+                        }
+                        val result = container.syncManager.sync(token)
+                        if (result.errors.isNotEmpty()) {
+                            GoogleAccountPicker.invalidateToken(ctx, token)
+                            return@out "Sincronización con errores: ${result.errors.first()}"
+                        }
+                        if (completeOnboarding) {
+                            container.settings.setDriveAccountEmail(email)
+                            container.settings.setDriveSyncEnabled(true)
+                        }
+                        summarize(result)
+                    } else {
+                        // A sincronización manual requiere cuenta y token previo.
+                        "No hay cuenta conectada para sincronizar."
                     }
-                    val result = container.syncManager.sync(token)
-                    if (result.errors.isNotEmpty()) {
-                        GoogleAccountPicker.invalidateToken(ctx, token)
-                        return@out "Sincronización con errores: ${result.errors.first()}"
-                    }
-                    if (completeOnboarding) {
-                        container.settings.setDriveAccountEmail(email)
-                        container.settings.setDriveSyncEnabled(true)
-                    }
-                    summarize(result)
-                } else {
-                    // A sincronización manual requiere cuenta y token previo.
-                    "No hay cuenta conectada para sincronizar."
                 }
+            } catch (_: Throwable) {
+                "No se pudo sincronizar con Google. Puedes seguir usando ChrisAI y reintentar desde Ajustes."
             }
-            if (completeOnboarding && byEmail && !outcome.startsWith("No se pudo") && !outcome.startsWith("Sincronización con errores")) {
+            if (completeOnboarding) {
                 container.settings.setOnboardingCompleted(true)
             }
             _state.update {
@@ -1681,5 +2259,7 @@ class ChrisViewModel(app: Application) : AndroidViewModel(app) {
         const val CALL_GREETING = "Hola, ¿qué necesitas?"
         const val ATTACH_DIR = "attachments"
         const val MAX_IMAGE_DIM = 1280
+        // v1.1: default OpenRouter image model (DALL·E-class). Override at runtime.
+        const val GENERATED_IMAGE_MODEL = "openai/dall-e-3"
     }
 }

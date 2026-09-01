@@ -19,16 +19,21 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * v0.9 controlled camera capture (Camera2).
+ * v1.1 controlled camera capture (Camera2).
  *
  * Captures ONE JPEG still every [intervalSec] seconds (bounded 2..60) instead of
  * streaming video frame-by-frame: low data, low quota, explicit start/stop.
- * Permission problems and device failures surface as [onProblem] and never crash.
+ * Front/back lens switching works "in hot" (reopens the other camera without
+ * tearing down the frame pipeline / call), so [VisionFrameBus] keeps flowing
+ * across the switch. Permission problems and device failures surface as
+ * [onProblem] and never crash.
  */
 class CameraCaptureSession(context: Context) {
 
     companion object {
         private const val MAX_JPEG_BYTES = 1_200_000L
+        const val FACE_BACK = CameraCharacteristics.LENS_FACING_BACK
+        const val FACE_FRONT = CameraCharacteristics.LENS_FACING_FRONT
     }
 
     private val appContext = context.applicationContext
@@ -47,8 +52,17 @@ class CameraCaptureSession(context: Context) {
     private var intervalMs = 5_000L
     private var outputDir: File? = null
     private var onFrame: (File) -> Unit = {}
+    private var offProblem: (String) -> Unit = {}
+
+    private var lensFacing = FACE_BACK
 
     val isActive: Boolean get() = running.get()
+    val currentFacing: Int get() = lensFacing
+
+    /** Preferred lens for the next start/switch (BACK or FRONT). */
+    fun setLensFacing(facing: Int) {
+        lensFacing = if (facing == FACE_FRONT) FACE_FRONT else FACE_BACK
+    }
 
     /** Starts periodic captures. [onProblem] fires for permission/device errors. */
     fun start(intervalSec: Int, dir: File, onFrame: (File) -> Unit, onProblem: (String) -> Unit) {
@@ -62,12 +76,42 @@ class CameraCaptureSession(context: Context) {
         intervalMs = intervalSec.coerceIn(2, 60) * 1000L
         outputDir = dir
         this.onFrame = onFrame
+        offProblem = onProblem
+        startCameraInternal()
+    }
 
+    /**
+     * Switches the lens (front ↔ back) keeping the capture pipeline alive.
+     * The frame channel ([VisionFrameBus]) is NOT marked inactive during the
+     * switch, so the view/call state does not flicker.
+     */
+    fun switchCamera(facing: Int) {
+        if (!running.get()) {
+            setLensFacing(facing)
+            return
+        }
+        lensFacing = if (facing == FACE_FRONT) FACE_FRONT else FACE_BACK
+        releaseResources()
+        startCameraInternal()
+    }
+
+    /** Stops captures immediately and releases the camera. */
+    fun stop() {
+        if (!running.compareAndSet(true, false)) {
+            // Ensure resources are released even if never started.
+            releaseResources()
+            return
+        }
+        release()
+    }
+
+    private fun startCameraInternal() {
+        val problem: (String) -> Unit = offProblem
         try {
             startThread()
             VisionFrameBus.setCameraActive(true)
-            val id = firstCameraId() ?: run {
-                onProblem("No hay cámara disponible en este dispositivo.")
+            val id = firstCameraId(lensFacing) ?: run {
+                problem("No hay cámara disponible en este dispositivo.")
                 stop()
                 return
             }
@@ -79,22 +123,19 @@ class CameraCaptureSession(context: Context) {
             if (!running.compareAndSet(false, true)) return
             cameraManager.openCamera(id, cameraStateCallback, cameraHandler)
         } catch (e: Exception) {
-            onProblem("No se pudo iniciar la cámara: ${e.message.orEmpty()}")
-            stop()
-        }
-    }
-
-    /** Stops captures immediately and releases the camera. */
-    fun stop() {
-        if (!running.compareAndSet(true, false)) {
-            // Ensure resources are released even if never started.
+            problem("No se pudo iniciar la cámara: ${e.message.orEmpty()}")
             release()
-            return
         }
-        release()
     }
 
+    /** Full stop: releases everything and mirrors 'inactive' on the bus. */
     private fun release() {
+        releaseResources()
+        VisionFrameBus.setCameraActive(false)
+    }
+
+    /** Releases hardware handles but keeps the frame bus state untouched (switch path). */
+    private fun releaseResources() {
         try { session?.close() } catch (_: Exception) {}
         session = null
         try { camera?.close() } catch (_: Exception) {}
@@ -105,7 +146,7 @@ class CameraCaptureSession(context: Context) {
         cameraThread?.quitSafely()
         cameraThread = null
         cameraHandler = null
-        VisionFrameBus.setCameraActive(false)
+        running.set(false)
     }
 
     private fun startThread() {
@@ -114,12 +155,11 @@ class CameraCaptureSession(context: Context) {
         cameraHandler = Handler(thread.looper)
     }
 
-    private fun firstCameraId(): String? {
+    private fun firstCameraId(facing: Int): String? {
         val ids = cameraManager.cameraIdList
-        // Prefer the back camera for "what do you see?" framing.
         return ids.firstOrNull { id ->
             val traits = cameraManager.getCameraCharacteristics(id)
-            traits.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+            traits.get(CameraCharacteristics.LENS_FACING) == facing
         } ?: ids.firstOrNull()
     }
 
@@ -180,7 +220,11 @@ class CameraCaptureSession(context: Context) {
     private fun startRepeating(session: CameraCaptureSession) {
         val request = session.device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(reader!!.surface)
-            set(CaptureRequest.JPEG_ORIENTATION, 90)
+            set(
+                CaptureRequest.JPEG_ORIENTATION,
+                // Front sensors are mirrored: rotate 180° so the preview reads natural.
+                if (lensFacing == FACE_FRONT) 270 else 90
+            )
         }.build()
         try {
             session.setRepeatingRequest(request, null, cameraHandler)

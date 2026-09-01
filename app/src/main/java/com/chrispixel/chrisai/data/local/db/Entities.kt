@@ -42,7 +42,11 @@ data class MessageEntity(
     val promptTokens: Int?,
     val completionTokens: Int?,
     // v0.8.1: absolute path of the attached image file (null for text-only).
-    val imagePath: String?
+    val imagePath: String?,
+    // v1.1: absolute path of an assistant-generated image file (null otherwise).
+    val generatedImagePath: String?,
+    // v1.1: absolute path of an audio file (synthesized or attached).
+    val audioPath: String?
 )
 
 @Entity(tableName = "memories", indices = [Index(value = ["text"], unique = true)])

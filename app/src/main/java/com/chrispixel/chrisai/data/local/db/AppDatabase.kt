@@ -18,7 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         MemoryEntity::class
     ],
-    version = 3,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -39,6 +39,20 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'general'")
+            }
+        }
+
+        /** v4: v1.1 assistant-generated image path per message. Non-destructive. */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN generatedImagePath TEXT")
+            }
+        }
+
+        /** v5: v1.1 per-message audio file path (synthesized or attached). Non-destructive. */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN audioPath TEXT")
             }
         }
     }

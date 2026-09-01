@@ -5,8 +5,11 @@ import android.accounts.AccountManager
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -47,6 +50,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -69,6 +73,17 @@ import com.chrispixel.chrisai.ui.UpdateUiState
 fun SettingsScreen(vm: ChrisViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scrollState = rememberScrollState()
+
+    var showDeveloper by remember { mutableStateOf(false) }
+
+    if (showDeveloper) {
+        com.chrispixel.chrisai.ui.dev.DeveloperModeScreen(
+            vm = vm,
+            onBack = { showDeveloper = false },
+            onAttached = { showDeveloper = false }
+        )
+        return
+    }
 
     val ttsVoices = remember { mutableStateListOf<TtsVoiceInfo>() }
     LaunchedEffect(state.ttsEnabled) {
@@ -139,10 +154,12 @@ fun SettingsScreen(vm: ChrisViewModel) {
             callMode = state.callModeEnabled,
             callGreeting = state.callGreetingEnabled,
             callContinuous = state.callContinuousEnabled,
+            bargeIn = state.bargeInEnabled,
             images = state.imagesEnabled,
             onCallMode = { vm.setCallModeEnabled(it) },
             onCallGreeting = { vm.setCallGreetingEnabled(it) },
             onCallContinuous = { vm.setCallContinuousEnabled(it) },
+            onBargeIn = { vm.setBargeInEnabled(it) },
             onImages = { vm.setImagesEnabled(it) }
         )
 
@@ -186,6 +203,13 @@ fun SettingsScreen(vm: ChrisViewModel) {
             onCheck = { vm.checkForUpdates() },
             onDownload = { vm.downloadUpdate() },
             onInstall = { context -> vm.installUpdate(context) }
+        )
+
+        SectionHeader("Developer Mode")
+        DeveloperModeSection(
+            folderSet = state.devAgentUri.isNotBlank(),
+            fileCount = state.devAgentFiles.size,
+            onOpen = { showDeveloper = true }
         )
 
         Spacer(Modifier.height(8.dp))
@@ -502,38 +526,114 @@ private fun VoiceSection(
         if (ttsVoices.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             Text(
-                "Voz actual: ${ttsVoice.ifBlank { "predeterminada" }}",
+                "Voz actual: ${ttsVoices.firstOrNull { it.name == ttsVoice }?.displayName ?: ttsVoice.ifBlank { "predeterminada (voz del sistema)" }}",
                 style = MaterialTheme.typography.bodyMedium
             )
-            ttsVoices.take(8).forEach { voice ->
+            Text(
+                "${ttsVoices.size} voces instaladas en este dispositivo",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            var search by rememberSaveable { mutableStateOf("") }
+            var langFilter by rememberSaveable { mutableStateOf<String?>(null) }
+
+            val languages = remember(ttsVoices) {
+                ttsVoices.mapNotNull { it.locale.language.ifBlank { null } }
+                    .distinct().sorted()
+            }
+            val loweredQuery = search.trim().lowercase()
+            val filtered = remember(ttsVoices, search, langFilter) {
+                ttsVoices.filter { voice ->
+                    val lang = voice.locale.language.lowercase()
+                    val country = voice.locale.country.lowercase()
+                    val langMatch = langFilter == null || lang == langFilter!!.lowercase()
+                    val qMatch = loweredQuery.isBlank() ||
+                        voice.name.lowercase().contains(loweredQuery) ||
+                        voice.locale.getDisplayLanguage().lowercase().contains(loweredQuery) ||
+                        voice.locale.getDisplayCountry().lowercase().contains(loweredQuery) ||
+                        lang.contains(loweredQuery) ||
+                        country.contains(loweredQuery)
+                    langMatch && qMatch
+                }
+            }
+
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Buscar voz, idioma o región (ej. es-MX)") }
+            )
+
+            if (languages.size > 1) {
+                Spacer(Modifier.height(4.dp))
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onVoice(voice.name) }
-                        .padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
                 ) {
-                    RadioButton(selected = voice.name == ttsVoice, onClick = { onVoice(voice.name) })
-                    Spacer(Modifier.width(4.dp))
+                    VoiceLangChip(label = "Todos", selected = langFilter == null) {
+                        langFilter = null
+                    }
+                    languages.forEach { lang ->
+                        val isSelected = langFilter == lang
+                        VoiceLangChip(label = lang, selected = isSelected) { langFilter = lang }
+                    }
+                }
+            }
+
+            if (filtered.isEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Ninguna voz coincide con la búsqueda. Prueba con otro idioma o región.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Spacer(Modifier.height(8.dp))
+                filtered.take(60).forEach { voice ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onVoice(voice.name) }
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = voice.name == ttsVoice, onClick = { onVoice(voice.name) })
+                        Spacer(Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                voice.displayName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1
+                            )
+                            if (voice.isNetwork) {
+                                Text(
+                                    "${voice.localeLabel} · red",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                Text(
+                                    voice.localeLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        TextButton(onClick = {
+                            onVoice(voice.name)
+                            onPreview("Hola, soy ChrisAI. Esta es mi voz.")
+                        }) { Text("Probar") }
+                    }
+                }
+                if (filtered.size > 60) {
                     Text(
-                        voice.displayName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        voice.localeLabel,
+                        "…y ${filtered.size - 60} voces más. Usa la búsqueda para encontrarlas.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-            }
-            if (ttsVoices.size > 8) {
-                Text(
-                    "…y ${ttsVoices.size - 8} voces más (elige por nombre con texto o voz del sistema).",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         } else {
             Spacer(Modifier.height(8.dp))
@@ -554,6 +654,23 @@ private fun VoiceSection(
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+private fun VoiceLangChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val container = if (selected) MaterialTheme.colorScheme.secondaryContainer
+    else MaterialTheme.colorScheme.surfaceVariant
+    val content = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+    else MaterialTheme.colorScheme.onSurfaceVariant
+    Box(
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .background(container)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = content)
     }
 }
 
@@ -590,10 +707,12 @@ private fun CallVisionSection(
     callMode: Boolean,
     callGreeting: Boolean,
     callContinuous: Boolean,
+    bargeIn: Boolean,
     images: Boolean,
     onCallMode: (Boolean) -> Unit,
     onCallGreeting: (Boolean) -> Unit,
     onCallContinuous: (Boolean) -> Unit,
+    onBargeIn: (Boolean) -> Unit,
     onImages: (Boolean) -> Unit
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -623,6 +742,16 @@ private fun CallVisionSection(
         }
         Text(
             "Vuelve a escuchar automáticamente tras cada respuesta.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Barge-in (interrumpir hablando)", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Switch(checked = bargeIn, onCheckedChange = onBargeIn)
+        }
+        Text(
+            "Mientras ChrisAI habla, puedes cortarle diciendo algo. El micrófono detecta tu voz por encima de su audio.",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1043,8 +1172,35 @@ private fun DriveAccountDialog(
                 }
             }
         },
-confirmButton = {
+        confirmButton = {
             TextButton(onClick = onDismiss) { Text("Cancelar") }
         }
     )
+}
+
+@Composable
+private fun DeveloperModeSection(
+    folderSet: Boolean,
+    fileCount: Int,
+    onOpen: () -> Unit
+) {
+    Text(
+        "Agente local por Storage Access Framework: selecciona una carpeta " +
+            "de tu dispositivo o de Google Drive y adjunta archivos de texto " +
+            "al chat como contexto.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(8.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            if (folderSet) "Carpeta de trabajo configurada · $fileCount archivos"
+            else "Sin carpeta de trabajo",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f)
+        )
+        OutlinedButton(onClick = onOpen) {
+            Text(if (folderSet) "Abrir agente local" else "Configurar")
+        }
+    }
 }

@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -51,7 +52,7 @@ import androidx.core.content.ContextCompat
 import com.chrispixel.chrisai.data.live.LiveStage
 import com.chrispixel.chrisai.data.vision.VisionFrameBus
 import com.chrispixel.chrisai.ui.ChrisViewModel
-import com.chrispixel.chrisai.ui.components.ChrisAvatar
+import com.chrispixel.chrisai.ui.avatar3d.ChrisAvatar3D
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -120,11 +121,12 @@ fun VideoCallScreen(vm: ChrisViewModel) {
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    ChrisAvatar(
+                    ChrisAvatar3D(
                         emotion = state.emotion,
                         stage = state.liveStage,
                         intensity = state.emotionState?.intensity ?: 0f,
-                        animationsEnabled = state.animationsEnabled
+                        animationsEnabled = state.animationsEnabled,
+                        modifier = Modifier.size(260.dp, 300.dp)
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
@@ -147,19 +149,30 @@ fun VideoCallScreen(vm: ChrisViewModel) {
                     contentAlignment = Alignment.Center
                 ) {
                     if (state.cameraActive && cameraFrame != null) {
-                        CameraPreview(path = cameraFrame!!)
+                        CameraPreview(path = cameraFrame!!, mirror = state.cameraFacing == "front")
                     } else {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("📷", fontSize = 30.sp)
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                if (state.cameraActive) "Iniciando cámara…" else "Cámara apagada",
+                                if (state.cameraActive) "Iniciando cámara…" else "Cámara pausada",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = Color(0xFF8A93A6)
                             )
                         }
                     }
                 }
+            }
+
+            if (state.cameraActive) {
+                Text(
+                    if (state.cameraFacing == "front") "Cámara frontal (mirror)" else "Cámara trasera",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF8A93A6),
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(top = 4.dp)
+                )
             }
 
             state.videoError?.let { message ->
@@ -180,6 +193,7 @@ fun VideoCallScreen(vm: ChrisViewModel) {
             Controls(
                 callActive = state.callActive,
                 cameraActive = state.cameraActive,
+                cameraFacing = state.cameraFacing,
                 screenSharing = state.screenSharing,
                 hasVisionFrame = state.hasVisionFrame,
                 micGranted = micGranted,
@@ -190,6 +204,7 @@ fun VideoCallScreen(vm: ChrisViewModel) {
                     else if (cameraGranted) vm.startCamera()
                     else cameraLauncher.launch(Manifest.permission.CAMERA)
                 },
+                onSwitchCamera = { vm.switchCamera() },
                 onRequestScreen = {
                     val projection = context.getSystemService(MediaProjectionManager::class.java)
                     if (projection != null) screenCaptureLauncher.launch(projection.createScreenCaptureIntent())
@@ -253,7 +268,7 @@ private fun TopBar(
 }
 
 @Composable
-private fun CameraPreview(path: String) {
+private fun CameraPreview(path: String, mirror: Boolean) {
     var bitmap by remember(path) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(path) {
         bitmap = withContext(Dispatchers.IO) {
@@ -270,7 +285,8 @@ private fun CameraPreview(path: String) {
             contentDescription = "Cámara actual",
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0B0E14)),
+                .background(Color(0xFF0B0E14))
+                .graphicsLayer { scaleX = if (mirror) -1f else 1f },
             contentScale = ContentScale.Crop
         )
     }
@@ -280,12 +296,14 @@ private fun CameraPreview(path: String) {
 private fun Controls(
     callActive: Boolean,
     cameraActive: Boolean,
+    cameraFacing: String,
     screenSharing: Boolean,
     hasVisionFrame: Boolean,
     micGranted: Boolean,
     onMic: () -> Unit,
     onRequestMic: () -> Unit,
     onToggleCamera: () -> Unit,
+    onSwitchCamera: () -> Unit,
     onRequestScreen: () -> Unit,
     onStopScreen: () -> Unit,
     onExplain: () -> Unit,
@@ -298,14 +316,22 @@ private fun Controls(
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             ControlChip(
-                label = if (cameraActive) "Cámara: on" else "Cámara",
+                label = if (cameraActive) "Pausar" else "Reanudar",
                 emoji = "📷",
                 active = cameraActive,
                 modifier = Modifier.weight(1f),
                 onClick = onToggleCamera
             )
             ControlChip(
-                label = if (screenSharing) "Detener pantalla" else "Pantalla",
+                label = if (cameraFacing == "back") "Frontal" else "Trasera",
+                emoji = "🔄",
+                active = false,
+                enabled = cameraActive,
+                modifier = Modifier.weight(1f),
+                onClick = onSwitchCamera
+            )
+            ControlChip(
+                label = if (screenSharing) "Detener" else "Pantalla",
                 emoji = "🖥️",
                 active = screenSharing,
                 modifier = Modifier.weight(1f),
